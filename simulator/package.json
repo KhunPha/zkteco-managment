@@ -1,0 +1,13 @@
+{
+  "name": "zkteco-device-simulator",
+  "version": "1.0.0",
+  "description": "High-fidelity ZKTeco Biometric Terminal Hardware Simulator (TCP/IP socket port 4370 and ADMS HTTP push)",
+  "main": "zkteco_device_simulator.js",
+  "scripts": {
+    "start": "node zkteco_device_simulator.js",
+    "adms": "node zkteco_device_simulator.js --mode adms",
+    "tcp": "node zkteco_device_simulator.js --mode tcp"
+  },
+  "dependencies": {}
+}
+
