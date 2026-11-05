@@ -342,6 +342,16 @@ public class DeviceService {
         AttendanceDeviceUser devUser = deviceUserRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("DeviceUser", "id", id));
 
+        if (request.getDevicePin() != null && !request.getDevicePin().trim().isEmpty()) {
+            String newPin = request.getDevicePin().trim();
+            if (!newPin.equalsIgnoreCase(devUser.getDevicePin())) {
+                if (deviceUserRepository.existsByDeviceIdAndDevicePin(devUser.getDevice().getId(), newPin)) {
+                    throw new AppException(ErrorCode.DUPLICATE_RESOURCE, "PIN " + newPin + " already exists on device " + devUser.getDevice().getName());
+                }
+                devUser.setDevicePin(newPin);
+            }
+        }
+
         devUser.setNameOnDevice(request.getNameOnDevice());
         if (request.getPrivilege() != null) devUser.setPrivilege(request.getPrivilege());
         if (request.getCardNumber() != null) devUser.setCardNumber(request.getCardNumber());
@@ -359,6 +369,23 @@ public class DeviceService {
         devUser.setLastSyncedAt(Instant.now());
         AttendanceDeviceUser saved = deviceUserRepository.save(devUser);
         queueUserToDevice(saved.getDevice(), saved);
+
+        if (saved.getEmployee() != null) {
+            List<AttendanceDeviceUser> siblings = deviceUserRepository.findByEmployeeId(saved.getEmployee().getId());
+            for (AttendanceDeviceUser sib : siblings) {
+                if (!sib.getId().equals(saved.getId())) {
+                    if (request.getCardNumber() != null) sib.setCardNumber(request.getCardNumber());
+                    if (request.getPassword() != null) sib.setPassword(request.getPassword());
+                    if (request.getNameOnDevice() != null) sib.setNameOnDevice(request.getNameOnDevice());
+                    if (request.getFaceEnrolled() != null) sib.setFaceEnrolled(request.getFaceEnrolled());
+                    if (request.getFingerprintCount() != null) sib.setFingerprintCount(request.getFingerprintCount());
+                    sib.setLastSyncedAt(Instant.now());
+                    AttendanceDeviceUser sibSaved = deviceUserRepository.save(sib);
+                    queueUserToDevice(sibSaved.getDevice(), sibSaved);
+                }
+            }
+        }
+
         return toDeviceUserDto(saved);
     }
 
@@ -374,6 +401,21 @@ public class DeviceService {
 
         AttendanceDeviceUser saved = deviceUserRepository.save(devUser);
         queueUserToDevice(saved.getDevice(), saved);
+
+        if (saved.getEmployee() != null) {
+            List<AttendanceDeviceUser> siblings = deviceUserRepository.findByEmployeeId(saved.getEmployee().getId());
+            for (AttendanceDeviceUser sib : siblings) {
+                if (!sib.getId().equals(saved.getId())) {
+                    if (cardNumber != null) sib.setCardNumber(cardNumber);
+                    if (faceEnrolled != null) sib.setFaceEnrolled(faceEnrolled);
+                    if (fingerprintCount != null) sib.setFingerprintCount(fingerprintCount);
+                    sib.setLastSyncedAt(Instant.now());
+                    AttendanceDeviceUser sibSaved = deviceUserRepository.save(sib);
+                    queueUserToDevice(sibSaved.getDevice(), sibSaved);
+                }
+            }
+        }
+
         recordOperation(saved.getDevice(), "ENROLL_BIOMETRICS",
                 "PIN=" + saved.getDevicePin() + " Face=" + saved.isFaceEnrolled() + " FP=" + saved.getFingerprintCount(),
                 "SUCCESS", null);
@@ -404,6 +446,9 @@ public class DeviceService {
 
                 user.setNameOnDevice(ru.getName());
                 user.setPrivilege(ru.getPrivilege());
+                if (ru.getCardNumber() != null && !ru.getCardNumber().isBlank()) {
+                    user.setCardNumber(ru.getCardNumber());
+                }
                 user.setLastSyncedAt(Instant.now());
                 user.setSyncStatus("SYNCED");
 

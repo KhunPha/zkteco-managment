@@ -16,6 +16,8 @@ public class ScheduleDto {
     private Long employeeId;
     private String employeeCode;
     private String employeeName;
+    private String departmentName;
+    private String branchName;
     private Long shiftId;
     private String shiftName;
     private LocalDate effectiveFrom;

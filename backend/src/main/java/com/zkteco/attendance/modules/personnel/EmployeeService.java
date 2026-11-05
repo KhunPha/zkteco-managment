@@ -125,6 +125,16 @@ public class EmployeeService {
                 .filter(e -> e.getDeletedAt() == null)
                 .orElseThrow(() -> new ResourceNotFoundException("Employee", "id", id));
 
+        if (request.getEmployeeCode() != null && !request.getEmployeeCode().trim().isEmpty()) {
+            String newCode = request.getEmployeeCode().trim().toUpperCase();
+            if (!newCode.equalsIgnoreCase(emp.getEmployeeCode())) {
+                if (employeeRepository.existsByEmployeeCodeAndDeletedAtIsNull(newCode)) {
+                    throw new AppException(ErrorCode.DUPLICATE_RESOURCE, "Employee code already exists: " + newCode);
+                }
+                emp.setEmployeeCode(newCode);
+            }
+        }
+
         emp.setKhmerName(request.getKhmerName());
         emp.setEnglishName(request.getEnglishName().trim());
         emp.setGender(request.getGender().toUpperCase());

@@ -63,9 +63,23 @@ public class ZKTecoTcpClient implements BiometricDeviceClient {
                 disconnectSession(socket, session);
                 return true;
             }
-            return false;
         } catch (Exception ex) {
-            log.warn("TCP Connection test failed for {}:{}: {}", host, port, ex.getMessage());
+            log.debug("TCP connection test for {}:{}: {}", host, port, ex.getMessage());
+        }
+
+        // UDP fallback test for UDP-based ZKTeco terminals (e.g. IN01-A, K40, etc.)
+        try (java.net.DatagramSocket udp = new java.net.DatagramSocket()) {
+            udp.setSoTimeout(2000);
+            byte[] packet = createPacket(CMD_CONNECT, 0, 0, new byte[0]);
+            java.net.DatagramPacket dPacket = new java.net.DatagramPacket(packet, packet.length, java.net.InetAddress.getByName(host), port);
+            udp.send(dPacket);
+            byte[] buf = new byte[1024];
+            java.net.DatagramPacket dResp = new java.net.DatagramPacket(buf, buf.length);
+            udp.receive(dResp);
+            int code = getResponseCode(dResp.getData());
+            return code == CMD_ACK_OK || code == 2005;
+        } catch (Exception ex) {
+            log.warn("Connection test failed for {}:{}: {}", host, port, ex.getMessage());
             return false;
         }
     }
@@ -233,8 +247,11 @@ public class ZKTecoTcpClient implements BiometricDeviceClient {
 
             if (cardNumber != null && !cardNumber.isBlank()) {
                 try {
-                    long card = Long.parseLong(cardNumber.trim());
-                    bb.putInt(35, (int) card);
+                    String clean = cardNumber.replaceAll("[^0-9]", "");
+                    if (!clean.isEmpty()) {
+                        long card = Long.parseLong(clean);
+                        bb.putInt(35, (int) card);
+                    }
                 } catch (Exception ignored) {}
             }
 
@@ -468,6 +485,9 @@ public class ZKTecoTcpClient implements BiometricDeviceClient {
                 byte[] nameBytes = new byte[24];
                 bb.get(nameBytes);
 
+                long card = bb.getInt() & 0xFFFFFFFFL;
+                String cardNumber = card > 0 ? String.valueOf(card) : null;
+
                 String name = new String(nameBytes).trim().replace("\0", "");
                 String pin = String.valueOf(pinNum);
 
@@ -475,6 +495,7 @@ public class ZKTecoTcpClient implements BiometricDeviceClient {
                         .pin(pin)
                         .name(name)
                         .privilege(privilege == 14 ? "ADMIN" : "NORMAL_USER")
+                        .cardNumber(cardNumber)
                         .enabled(true)
                         .build());
             } catch (Exception ex) {

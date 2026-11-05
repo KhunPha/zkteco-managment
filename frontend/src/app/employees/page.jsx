@@ -24,8 +24,9 @@ export default function EmployeesPage() {
   const [departmentId, setDepartmentId] = useState("");
   const [status, setStatus] = useState("");
   const [showModal, setShowModal] = useState(false);
+  const [editingEmployeeId, setEditingEmployeeId] = useState(null);
 
-  const [formData, setFormData] = useState({
+  const initialForm = {
     employeeCode: "",
     englishName: "",
     khmerName: "",
@@ -38,7 +39,34 @@ export default function EmployeesPage() {
     employmentType: "FULL_TIME",
     employmentStartDate: new Date().toISOString().split("T")[0],
     employmentStatus: "ACTIVE",
-  });
+  };
+
+  const [formData, setFormData] = useState(initialForm);
+
+  const openCreateModal = () => {
+    setEditingEmployeeId(null);
+    setFormData(initialForm);
+    setShowModal(true);
+  };
+
+  const openEditModal = (emp) => {
+    setEditingEmployeeId(emp.id);
+    setFormData({
+      employeeCode: emp.employeeCode || "",
+      englishName: emp.englishName || "",
+      khmerName: emp.khmerName || "",
+      gender: emp.gender || "MALE",
+      email: emp.email || "",
+      phoneNumber: emp.phoneNumber || "",
+      departmentId: emp.departmentId ? String(emp.departmentId) : "",
+      positionId: emp.positionId ? String(emp.positionId) : "",
+      branchId: emp.branchId ? String(emp.branchId) : "",
+      employmentType: emp.employmentType || "FULL_TIME",
+      employmentStartDate: emp.employmentStartDate ? emp.employmentStartDate.split("T")[0] : new Date().toISOString().split("T")[0],
+      employmentStatus: emp.employmentStatus || "ACTIVE",
+    });
+    setShowModal(true);
+  };
 
   const { data: departments } = useQuery({
     queryKey: ["all-departments"],
@@ -83,20 +111,26 @@ export default function EmployeesPage() {
     onSuccess: () => {
       queryClient.invalidateQueries(["employees"]);
       setShowModal(false);
-      setFormData({
-        employeeCode: "",
-        englishName: "",
-        khmerName: "",
-        gender: "MALE",
-        email: "",
-        phoneNumber: "",
-        departmentId: "",
-        positionId: "",
-        branchId: "",
-        employmentType: "FULL_TIME",
-        employmentStartDate: new Date().toISOString().split("T")[0],
-        employmentStatus: "ACTIVE",
-      });
+      setFormData(initialForm);
+    },
+    onError: (err) => {
+      alert("Error creating employee: " + (err.response?.data?.message || err.message));
+    },
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: async (payload) => {
+      const res = await api.put(`/api/v1/employees/${editingEmployeeId}`, payload);
+      return res.data?.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries(["employees"]);
+      setShowModal(false);
+      setEditingEmployeeId(null);
+      setFormData(initialForm);
+    },
+    onError: (err) => {
+      alert("Error updating employee: " + (err.response?.data?.message || err.message));
     },
   });
 
@@ -123,7 +157,7 @@ export default function EmployeesPage() {
           </p>
         </div>
         <button
-          onClick={() => setShowModal(true)}
+          onClick={openCreateModal}
           className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs shadow-md shadow-indigo-600/20 transition-all self-start sm:self-auto"
         >
           <Plus size={16} />
@@ -249,13 +283,22 @@ export default function EmployeesPage() {
                         </span>
                       </td>
                       <td className="py-3 px-4 text-right">
-                        <button
-                          onClick={() => deleteEmployee(emp.id)}
-                          className="p-1.5 rounded-lg text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/40"
-                          title="Deactivate Employee"
-                        >
-                          <Trash2 size={15} />
-                        </button>
+                        <div className="flex items-center justify-end gap-1">
+                          <button
+                            onClick={() => openEditModal(emp)}
+                            className="p-1.5 rounded-lg text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-950/40"
+                            title="Edit Employee / Update PIN"
+                          >
+                            <Edit size={15} />
+                          </button>
+                          <button
+                            onClick={() => deleteEmployee(emp.id)}
+                            className="p-1.5 rounded-lg text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/40"
+                            title="Deactivate Employee"
+                          >
+                            <Trash2 size={15} />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -271,33 +314,47 @@ export default function EmployeesPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
           <div className="w-full max-w-xl bg-white dark:bg-slate-900 rounded-3xl p-6 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
-              <h3 className="text-base font-bold text-slate-900 dark:text-white">Register New Employee</h3>
+              <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                {editingEmployeeId ? "Edit Employee & Terminal PIN" : "Register New Employee"}
+              </h3>
               <button onClick={() => setShowModal(false)} className="text-slate-400 hover:text-slate-600 text-lg">✕</button>
             </div>
 
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                createMutation.mutate({
+                const payload = {
                   ...formData,
                   departmentId: formData.departmentId ? Number(formData.departmentId) : null,
                   positionId: formData.positionId ? Number(formData.positionId) : null,
                   branchId: formData.branchId ? Number(formData.branchId) : null,
-                });
+                };
+                if (editingEmployeeId) {
+                  updateMutation.mutate(payload);
+                } else {
+                  createMutation.mutate(payload);
+                }
               }}
               className="space-y-3.5 text-xs"
             >
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Employee Code *</label>
+                  <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">
+                    Employee Code / Terminal User ID (Numeric) *
+                  </label>
                   <input
                     type="text"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
                     required
-                    placeholder="e.g. EMP001"
+                    placeholder="e.g. 1001"
                     value={formData.employeeCode}
-                    onChange={(e) => setFormData({ ...formData, employeeCode: e.target.value })}
+                    onChange={(e) => setFormData({ ...formData, employeeCode: e.target.value.replace(/\D/g, "") })}
                     className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono"
                   />
+                  <p className="text-[10px] text-slate-400 mt-1">
+                    Numeric keypad PIN (0-9). Typed on the ZKTeco device to punch or enroll.
+                  </p>
                 </div>
                 <div>
                   <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Gender *</label>
@@ -425,10 +482,12 @@ export default function EmployeesPage() {
                 </button>
                 <button
                   type="submit"
-                  disabled={createMutation.isPending}
+                  disabled={createMutation.isPending || updateMutation.isPending}
                   className="px-4 py-2 rounded-xl bg-indigo-600 text-white font-semibold hover:bg-indigo-500"
                 >
-                  {createMutation.isPending ? "Saving..." : "Create Employee"}
+                  {editingEmployeeId
+                    ? (updateMutation.isPending ? "Updating..." : "Update Employee")
+                    : (createMutation.isPending ? "Saving..." : "Create Employee")}
                 </button>
               </div>
             </form>

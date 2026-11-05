@@ -13,6 +13,8 @@ public interface EmployeeRepository extends JpaRepository<Employee, Long>, JpaSp
     boolean existsByEmployeeCodeAndDeletedAtIsNull(String employeeCode);
     long countByEmploymentStatusAndDeletedAtIsNull(String employmentStatus);
     List<Employee> findByDeletedAtIsNull();
+    List<Employee> findByDepartmentIdAndDeletedAtIsNull(Long departmentId);
+    List<Employee> findByBranchIdAndDeletedAtIsNull(Long branchId);
 }
 
 

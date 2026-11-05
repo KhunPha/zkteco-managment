@@ -2,6 +2,7 @@ package com.zkteco.attendance.modules.shift;
 
 import com.zkteco.attendance.common.ApiResponse;
 import com.zkteco.attendance.modules.shift.dto.AssignScheduleRequest;
+import com.zkteco.attendance.modules.shift.dto.BatchAssignScheduleRequest;
 import com.zkteco.attendance.modules.shift.dto.ScheduleDto;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -42,6 +43,14 @@ public class ScheduleController {
     public ResponseEntity<ApiResponse<ScheduleDto>> assignSchedule(@Valid @RequestBody AssignScheduleRequest request) {
         return ResponseEntity.status(HttpStatus.CREATED)
                 .body(ApiResponse.ok("Schedule assigned successfully", scheduleService.assignSchedule(request)));
+    }
+
+    @PostMapping("/batch")
+    @PreAuthorize("hasAuthority('schedule.create') or hasRole('SUPER_ADMIN') or hasRole('ADMIN') or hasRole('HR_MANAGER')")
+    @Operation(summary = "Batch assign shift schedule to employees or whole groups/departments")
+    public ResponseEntity<ApiResponse<List<ScheduleDto>>> assignBatchSchedule(@Valid @RequestBody BatchAssignScheduleRequest request) {
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(ApiResponse.ok("Schedules assigned successfully", scheduleService.assignBatchSchedule(request)));
     }
 
     @DeleteMapping("/{id}")

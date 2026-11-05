@@ -17,13 +17,13 @@ app:
     refresh-token-expiration-ms: 604800000 # 7 days
   security:
     cors:
-      allowed-origins: "http://localhost:3000,http://127.0.0.1:3000,http://localhost"
+      allowed-origins: "http://localhost:3131,http://127.0.0.1:3131,http://localhost:3000,http://127.0.0.1:3000"
       allowed-methods: "GET,POST,PUT,DELETE,PATCH,OPTIONS"
       allowed-headers: "*"
       allow-credentials: true
 
 server:
-  port: 8080
+  port: 8484
   servlet:
     context-path: /
 

@@ -91,6 +91,16 @@ public class StudentService {
                 .filter(st -> st.getDeletedAt() == null)
                 .orElseThrow(() -> new ResourceNotFoundException("Student", "id", id));
 
+        if (request.getStudentCode() != null && !request.getStudentCode().trim().isEmpty()) {
+            String newCode = request.getStudentCode().trim().toUpperCase();
+            if (!newCode.equalsIgnoreCase(s.getStudentCode())) {
+                if (studentRepository.existsByStudentCodeAndDeletedAtIsNull(newCode)) {
+                    throw new AppException(ErrorCode.DUPLICATE_RESOURCE, "Student code already exists: " + newCode);
+                }
+                s.setStudentCode(newCode);
+            }
+        }
+
         s.setKhmerName(request.getKhmerName());
         s.setEnglishName(request.getEnglishName().trim());
         s.setGender(request.getGender().toUpperCase());

@@ -1,6 +1,6 @@
 spring:
   datasource:
-    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/zkteco_attendance}
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5433/zkteco_attendance}
     username: ${SPRING_DATASOURCE_USERNAME:postgres}
     password: ${SPRING_DATASOURCE_PASSWORD:postgres}
     driver-class-name: org.postgresql.Driver
@@ -30,7 +30,7 @@ spring:
   data:
     redis:
       host: ${SPRING_REDIS_HOST:localhost}
-      port: ${SPRING_REDIS_PORT:6379}
+      port: ${SPRING_REDIS_PORT:6380}
       timeout: 2000ms
   cache:
     type: ${CACHE_TYPE:none} # Can be set to redis in full cluster mode

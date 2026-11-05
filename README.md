@@ -120,9 +120,11 @@ Upon the first launch, the Flyway migration (`V6__seed_data.sql`) seeds the init
 
 | Attribute | Default Production Value |
 |---|---|
-| **Portal URL** | `http://localhost:3000` (or `http://localhost:80`) |
-| **Backend REST API** | `http://localhost:8080/api/v1` |
-| **Swagger UI** | `http://localhost:8080/swagger-ui.html` |
+| **Portal URL** | `http://localhost:3131` |
+| **Backend REST API** | `http://localhost:8484/api/v1` |
+| **Swagger UI** | `http://localhost:8484/swagger-ui.html` |
+| **PostgreSQL Port** | `5433` |
+| **Redis Port** | `6380` |
 | **Username** | `admin` |
 | **Password** | `Admin@123456` |
 | **Default Timezone** | `Asia/Phnom_Penh` (UTC+07:00) |

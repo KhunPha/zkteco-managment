@@ -381,17 +381,20 @@ export default function TeachersPage() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">
-                    Teacher Code *
+                    Teacher Code / Terminal PIN (Numeric) *
                   </label>
                   <input
                     type="text"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
                     required
                     disabled={!!editingTeacherId}
-                    placeholder="e.g. TCH-005"
+                    placeholder="e.g. 2001"
                     value={formData.employeeCode}
-                    onChange={(e) => setFormData({ ...formData, employeeCode: e.target.value })}
+                    onChange={(e) => setFormData({ ...formData, employeeCode: e.target.value.replace(/\D/g, "") })}
                     className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-teal-500 font-mono disabled:opacity-50"
                   />
+                  <p className="text-[10px] text-slate-400 mt-0.5">Numeric keypad PIN (0-9) for ZKTeco terminal.</p>
                 </div>
                 <div>
                   <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">

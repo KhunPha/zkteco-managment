@@ -1,7 +1,7 @@
 /**
  * High-Fidelity ZKTeco Terminal Hardware Simulator
  * Simulates both:
- * 1. ADMS Push Client (pushes to Spring Boot backend http://localhost:8080/iclock/cdata)
+ * 1. ADMS Push Client (pushes to Spring Boot backend http://localhost:8484/iclock/cdata)
  * 2. Standalone TCP Server (listens on port 4370 for Spring Boot TCP/IP client pull commands)
  */
 
@@ -13,7 +13,7 @@ const CONFIG = {
   serialNumber: process.env.SIMULATOR_SN || 'ZK-SIM-8888',
   deviceName: 'Simulated Face & Fingerprint Terminal',
   backendHost: process.env.BACKEND_HOST || 'localhost',
-  backendPort: parseInt(process.env.BACKEND_PORT || '8080'),
+  backendPort: parseInt(process.env.BACKEND_PORT || '8484'),
   tcpPort: parseInt(process.env.SIMULATOR_TCP_PORT || '4370'),
   pushIntervalSec: 30
 };
