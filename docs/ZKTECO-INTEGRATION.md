@@ -71,7 +71,7 @@ Used for local intranet networks where the server pulls data directly from the t
 1. On the physical device screen, navigate to **Menu -> Comm. -> Cloud Server Server (or ADMS / Web Server)**.
 2. Configure:
    - **Server Address**: IP or domain of your attendance server (e.g. `192.168.1.100` or `attendance.enterprise.edu.kh`).
-   - **Server Port**: `80` (or `8080` if accessing backend directly).
+   - **Server Port**: `80` (or `8484` if accessing backend directly).
    - **Enable Proxy**: `OFF`.
    - **HTTPS**: Match your domain configuration.
 3. Save and reboot the device.

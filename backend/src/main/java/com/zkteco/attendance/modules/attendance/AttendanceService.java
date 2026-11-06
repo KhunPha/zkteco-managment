@@ -7,6 +7,8 @@ import com.zkteco.attendance.common.ResourceNotFoundException;
 import com.zkteco.attendance.modules.attendance.dto.AttendanceRecordDto;
 import com.zkteco.attendance.modules.attendance.dto.LiveScanEventDto;
 import com.zkteco.attendance.modules.attendance.dto.ManualAttendanceRequest;
+import com.zkteco.attendance.modules.biometric.FaceBiometric;
+import com.zkteco.attendance.modules.biometric.FaceBiometricRepository;
 import com.zkteco.attendance.modules.device.AttendanceDeviceUser;
 import com.zkteco.attendance.modules.device.DeviceUserRepository;
 import com.zkteco.attendance.modules.personnel.Employee;
@@ -44,6 +46,7 @@ public class AttendanceService {
     private final ShiftRepository shiftRepository;
     private final StudentRepository studentRepository;
     private final DeviceUserRepository deviceUserRepository;
+    private final FaceBiometricRepository faceBiometricRepository;
 
     @Transactional(readOnly = true)
     public PageResponse<AttendanceRecordDto> getAttendanceRecords(
@@ -267,6 +270,21 @@ public class AttendanceService {
                                     (emp.getPosition() != null && emp.getPosition().getTitle().toLowerCase().contains("teach"));
                 type = isTeacher ? "TEACHER" : "EMPLOYEE";
                 deptOrClass = emp.getDepartment() != null ? emp.getDepartment().getName() : "Office Staff";
+            }
+        }
+
+        // 4. Face Biometric lookup for photo & name if still unresolved or missing photo
+        if (pin != null) {
+            Optional<FaceBiometric> faceOpt = faceBiometricRepository.findByDevicePin(pin);
+            if (faceOpt.isPresent()) {
+                FaceBiometric fb = faceOpt.get();
+                if (photo == null || photo.isBlank()) {
+                    photo = fb.getPhotoPath();
+                }
+                if (("Card / User (" + pin + ")").equals(name) && fb.getPersonName() != null) {
+                    name = fb.getPersonName();
+                    type = fb.getPersonnelType() != null ? fb.getPersonnelType() : type;
+                }
             }
         }
 

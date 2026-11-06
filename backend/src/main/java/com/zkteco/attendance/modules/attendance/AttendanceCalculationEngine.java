@@ -1,6 +1,8 @@
 package com.zkteco.attendance.modules.attendance;
 
 import com.zkteco.attendance.common.TimeUtils;
+import com.zkteco.attendance.modules.biometric.FaceBiometric;
+import com.zkteco.attendance.modules.biometric.FaceBiometricRepository;
 import com.zkteco.attendance.modules.device.AttendanceDeviceUser;
 import com.zkteco.attendance.modules.device.DeviceUserRepository;
 import com.zkteco.attendance.modules.leave.HolidayRepository;
@@ -38,6 +40,7 @@ public class AttendanceCalculationEngine {
     private final HolidayRepository holidayRepository;
     private final LeaveRequestRepository leaveRequestRepository;
     private final StudentRepository studentRepository;
+    private final FaceBiometricRepository faceBiometricRepository;
 
     @Transactional
     public AttendanceProcessingLog processAttendanceForDate(LocalDate date) {
@@ -60,7 +63,7 @@ public class AttendanceCalculationEngine {
         Shift defaultShift = shiftRepository.findByCode("SHIFT_MORNING")
                 .orElseGet(() -> shiftRepository.findAll().stream().findFirst().orElse(null));
 
-        boolean isPublicHoliday = holidayRepository.existsByHolidayDate(date);
+        boolean isPublicHoliday = holidayRepository.isHolidayOnDate(date);
 
         // Pre-load all device user PINs mapped by employee ID and student ID (High performance batching)
         Map<Long, Set<String>> pinsByEmpId = new HashMap<>();
@@ -71,6 +74,14 @@ public class AttendanceCalculationEngine {
             }
             if (u.getStudent() != null && u.getDevicePin() != null) {
                 pinsByStudentId.computeIfAbsent(u.getStudent().getId(), k -> new HashSet<>()).add(u.getDevicePin());
+            }
+        }
+        for (FaceBiometric fb : faceBiometricRepository.findAll()) {
+            if (fb.getEmployee() != null && fb.getDevicePin() != null) {
+                pinsByEmpId.computeIfAbsent(fb.getEmployee().getId(), k -> new HashSet<>()).add(fb.getDevicePin());
+            }
+            if (fb.getStudent() != null && fb.getDevicePin() != null) {
+                pinsByStudentId.computeIfAbsent(fb.getStudent().getId(), k -> new HashSet<>()).add(fb.getDevicePin());
             }
         }
 

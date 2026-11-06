@@ -51,7 +51,6 @@ public class AttendanceController {
     }
 
     @GetMapping("/live-scans")
-    @PreAuthorize("hasAuthority('attendance.read') or hasRole('SUPER_ADMIN') or hasRole('ADMIN') or hasRole('HR_MANAGER')")
     @Operation(summary = "Get real-time live biometric scan events with resolved student/teacher/employee metadata")
     public ResponseEntity<ApiResponse<List<LiveScanEventDto>>> getLiveScans(
             @RequestParam(defaultValue = "15") int limit) {

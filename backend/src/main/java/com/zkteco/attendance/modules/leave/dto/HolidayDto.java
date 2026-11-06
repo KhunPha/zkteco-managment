@@ -15,8 +15,9 @@ public class HolidayDto {
     private Long id;
     private String name;
     private LocalDate holidayDate;
+    private LocalDate endDate;
+    private int daysCount;
     private boolean recurring;
     private boolean affectsTeachers;
     private boolean affectsStudents;
 }
-

@@ -14,11 +14,13 @@ import {
   Edit,
   UserCheck,
   UserX,
+  Camera,
 } from "lucide-react";
 import api from "@/lib/api";
 import { formatDate } from "@/lib/utils";
 import Portal from "@/components/common/Portal";
 import ImageUploadDropzone from "@/components/common/ImageUploadDropzone";
+import WebcamFaceEnrollModal from "@/components/biometrics/WebcamFaceEnrollModal";
 
 export default function EmployeesPage() {
   const queryClient = useQueryClient();
@@ -27,6 +29,7 @@ export default function EmployeesPage() {
   const [status, setStatus] = useState("");
   const [showModal, setShowModal] = useState(false);
   const [editingEmployeeId, setEditingEmployeeId] = useState(null);
+  const [faceEnrollPerson, setFaceEnrollPerson] = useState(null);
 
   const initialForm = {
     employeeCode: "",
@@ -361,6 +364,24 @@ export default function EmployeesPage() {
                       <td className="py-3 px-4 text-right">
                         <div className="flex items-center justify-end gap-1">
                           <button
+                            type="button"
+                            onClick={() =>
+                              setFaceEnrollPerson({
+                                id: emp.id,
+                                code: emp.employeeCode,
+                                name: emp.englishName,
+                                khmerName: emp.khmerName,
+                                type: "EMPLOYEE",
+                                departmentOrClass: emp.departmentName || "Employee",
+                                photoUrl: emp.profileImageUrl,
+                              })
+                            }
+                            className="p-1.5 rounded-lg text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 transition-colors"
+                            title="ចុះឈ្មោះ Face ID តាម Webcam (Enroll Face ID)"
+                          >
+                            <Camera size={15} />
+                          </button>
+                          <button
                             onClick={() => openEditModal(emp)}
                             className="p-1.5 rounded-lg text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-950/40"
                             title="Edit Employee / Update PIN"
@@ -584,6 +605,17 @@ export default function EmployeesPage() {
       </div>
     </Portal>
   )}
+
+      {/* Webcam Face ID Enrollment Modal */}
+      <WebcamFaceEnrollModal
+        isOpen={Boolean(faceEnrollPerson)}
+        person={faceEnrollPerson}
+        onClose={() => setFaceEnrollPerson(null)}
+        onSuccess={() => {
+          queryClient.invalidateQueries(["employees"]);
+          refetch();
+        }}
+      />
     </div>
   );
 }

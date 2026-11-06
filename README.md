@@ -152,7 +152,7 @@ docker compose up -d postgres redis
 cd backend
 mvn clean spring-boot:run
 ```
-The backend initializes database tables via Flyway migrations and begins listening on port `8080`.
+The backend initializes database tables via Flyway migrations and begins listening on port `8484`.
 
 ### Step 3: Start Next.js Frontend
 ```bash
@@ -160,7 +160,7 @@ cd frontend
 npm install
 npm run dev
 ```
-Open `http://localhost:3000` in your web browser.
+Open `http://localhost:3131` (or port `80` through Nginx) in your web browser.
 
 ---
 

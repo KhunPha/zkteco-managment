@@ -35,10 +35,12 @@ import {
   Calendar,
   Filter,
   UserCheck,
+  Camera,
 } from "lucide-react";
 import api from "@/lib/api";
 import Pagination from "@/components/common/Pagination";
 import Portal from "@/components/common/Portal";
+import WebcamFaceEnrollModal from "@/components/biometrics/WebcamFaceEnrollModal";
 
 // Smart RFID Card number parser: supports decimal, Wiegand (e.g. 197, 27883), and Hex
 function parseRfidCardInput(raw) {
@@ -117,6 +119,9 @@ export default function DeviceUsersPage() {
   const [quickScanStatus, setQuickScanStatus] = useState("idle"); // idle, saving, success, error
   const [quickScanMsg, setQuickScanMsg] = useState("");
   const quickInputRef = useRef(null);
+
+  // Webcam Face ID Enrollment Modal state
+  const [faceEnrollPerson, setFaceEnrollPerson] = useState(null);
 
   // Card History & Annual Renewal state
   const [showCardModal, setShowCardModal] = useState(false);
@@ -1122,18 +1127,34 @@ export default function DeviceUsersPage() {
                           <span>{u.fingerprintCount > 0 ? `${u.fingerprintCount} FP` : "No FP"}</span>
                         </span>
 
-                        {/* Face ID Badge */}
-                        <span
-                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold border transition-all ${
+                        {/* Face ID Badge & Quick Webcam Enrollment Button */}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setFaceEnrollPerson({
+                              id: u.employeeId || u.studentId || u.id,
+                              code: u.devicePin,
+                              name: u.personnelName || u.nameOnDevice || `User ${u.devicePin}`,
+                              khmerName: u.personnelKhmerName,
+                              type: u.personnelType || (u.studentId ? "STUDENT" : "EMPLOYEE"),
+                              departmentOrClass: u.departmentName || u.studentClassName || "Device User",
+                              photoUrl: u.profileImageUrl,
+                            })
+                          }
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold border transition-all cursor-pointer hover:scale-105 active:scale-95 ${
                             u.faceEnrolled
-                              ? "bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-800/80 shadow-2xs"
-                              : "bg-slate-100/80 dark:bg-slate-800/60 text-slate-400 dark:text-slate-500 border-slate-200/60 dark:border-slate-700/50"
+                              ? "bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-800/80 shadow-2xs hover:bg-indigo-100"
+                              : "bg-slate-100/80 dark:bg-slate-800/60 text-slate-400 dark:text-slate-500 border-slate-200/60 dark:border-slate-700/50 hover:border-emerald-400 hover:text-emerald-600 dark:hover:text-emerald-400 hover:bg-emerald-50/50"
                           }`}
-                          title={u.faceEnrolled ? "Face recognition biometric enrolled" : "No face enrolled"}
+                          title={
+                            u.faceEnrolled
+                              ? "Face recognition biometric active • Click to re-enroll with webcam"
+                              : "No face enrolled • Click to enroll Face ID via Webcam"
+                          }
                         >
                           <ScanFace size={12} className={u.faceEnrolled ? "text-indigo-600 dark:text-indigo-400" : "text-slate-400 dark:text-slate-500"} />
-                          <span>{u.faceEnrolled ? "Face ID" : "No Face"}</span>
-                        </span>
+                          <span>{u.faceEnrolled ? "Face ID ✓" : "📷 Enroll Face"}</span>
+                        </button>
 
                         {/* Card Badge or Quick Scan Button */}
                         {u.cardNumber ? (
@@ -2617,6 +2638,17 @@ export default function DeviceUsersPage() {
         </div>
         </Portal>
       )}
+
+      {/* Webcam Face ID Enrollment Modal */}
+      <WebcamFaceEnrollModal
+        isOpen={Boolean(faceEnrollPerson)}
+        person={faceEnrollPerson}
+        onClose={() => setFaceEnrollPerson(null)}
+        onSuccess={() => {
+          queryClient.invalidateQueries(["device-users"]);
+          refetch();
+        }}
+      />
     </div>
   );
 }

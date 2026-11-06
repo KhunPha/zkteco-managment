@@ -5,6 +5,10 @@ import com.zkteco.attendance.modules.attendance.AttendanceCalculationEngine;
 import com.zkteco.attendance.modules.attendance.AttendanceRawLog;
 import com.zkteco.attendance.modules.attendance.AttendanceRawLogRepository;
 import com.zkteco.attendance.modules.device.*;
+import com.zkteco.attendance.modules.personnel.Employee;
+import com.zkteco.attendance.modules.personnel.EmployeeRepository;
+import com.zkteco.attendance.modules.personnel.Student;
+import com.zkteco.attendance.modules.personnel.StudentRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -25,10 +29,14 @@ import java.util.Set;
 public class ZKTecoPushService {
 
     private final DeviceRepository deviceRepository;
+    private final DeviceUserRepository deviceUserRepository;
     private final DeviceCommandRepository commandRepository;
     private final AttendanceRawLogRepository rawLogRepository;
     private final DeviceSyncLogRepository syncLogRepository;
     private final AttendanceCalculationEngine calculationEngine;
+    private final EmployeeRepository employeeRepository;
+    private final StudentRepository studentRepository;
+    private final com.zkteco.attendance.modules.system.TelegramNotificationService telegramService;
 
     /**
      * Handle ADMS Handshake GET /iclock/cdata
@@ -113,6 +121,91 @@ public class ZKTecoPushService {
                                     .build();
                             rawLogRepository.save(rawLog);
                             count++;
+
+                            // Dispatch Telegram Alert asynchronously to Teacher / Staff / Student Group
+                            try {
+                                Optional<AttendanceDeviceUser> devUserOpt = deviceUserRepository.findByDeviceSerialNumberAndDevicePin(sn, pin);
+                                String personName = "User " + pin;
+                                String personType = "STAFF";
+                                String extraDetail = null;
+
+                                if (devUserOpt.isPresent()) {
+                                    AttendanceDeviceUser u = devUserOpt.get();
+                                    if (u.getNameOnDevice() != null && !u.getNameOnDevice().isBlank()) {
+                                        personName = u.getNameOnDevice();
+                                    }
+
+                                    if (u.getStudent() != null) {
+                                        personType = "STUDENT";
+                                        Student s = u.getStudent();
+                                        if (s.getKhmerName() != null && !s.getKhmerName().isBlank()) {
+                                            personName = s.getKhmerName() + " (" + s.getEnglishName() + ")";
+                                        } else if (s.getEnglishName() != null) {
+                                            personName = s.getEnglishName();
+                                        }
+                                        extraDetail = "ថ្នាក់ (Class): " + (s.getClassName() != null ? s.getClassName() : "N/A") +
+                                                      (s.getGrade() != null ? " | កម្រិត (Grade): " + s.getGrade() : "");
+                                    } else if (u.getEmployee() != null) {
+                                        Employee emp = u.getEmployee();
+                                        if (emp.getKhmerName() != null && !emp.getKhmerName().isBlank()) {
+                                            personName = emp.getKhmerName() + " (" + emp.getEnglishName() + ")";
+                                        } else if (emp.getEnglishName() != null) {
+                                            personName = emp.getEnglishName();
+                                        }
+
+                                        String posTitle = emp.getPosition() != null ? emp.getPosition().getTitle() : "";
+                                        String deptName = emp.getDepartment() != null ? emp.getDepartment().getName() : "";
+                                        String combined = (posTitle + " " + deptName).toLowerCase();
+
+                                        if (combined.contains("teacher") || combined.contains("teach") ||
+                                            combined.contains("lecturer") || combined.contains("professor") ||
+                                            combined.contains("instructor") || combined.contains("academic") ||
+                                            combined.contains("acad") || combined.contains("គ្រូ") || combined.contains("បង្រៀន")) {
+                                            personType = "TEACHER";
+                                        } else {
+                                            personType = "STAFF";
+                                        }
+
+                                        extraDetail = (posTitle.isBlank() ? "" : "តួនាទី: " + posTitle) +
+                                                      (deptName.isBlank() ? "" : (posTitle.isBlank() ? "" : " | ") + "ផ្នែក: " + deptName);
+                                    }
+                                } else {
+                                    // Fallback to direct lookup by PIN in Student and Employee tables
+                                    Optional<Student> studentOpt = studentRepository.findByStudentCodeAndDeletedAtIsNull(pin);
+                                    if (studentOpt.isPresent()) {
+                                        Student s = studentOpt.get();
+                                        personType = "STUDENT";
+                                        personName = (s.getKhmerName() != null ? s.getKhmerName() + " (" : "") + s.getEnglishName() + (s.getKhmerName() != null ? ")" : "");
+                                        extraDetail = "ថ្នាក់ (Class): " + (s.getClassName() != null ? s.getClassName() : "N/A");
+                                    } else {
+                                        Optional<Employee> empOpt = employeeRepository.findByEmployeeCodeAndDeletedAtIsNull(pin);
+                                        if (empOpt.isPresent()) {
+                                            Employee emp = empOpt.get();
+                                            String posTitle = emp.getPosition() != null ? emp.getPosition().getTitle() : "";
+                                            String deptName = emp.getDepartment() != null ? emp.getDepartment().getName() : "";
+                                            String combined = (posTitle + " " + deptName).toLowerCase();
+
+                                            if (combined.contains("teacher") || combined.contains("teach") ||
+                                                combined.contains("lecturer") || combined.contains("professor") ||
+                                                combined.contains("instructor") || combined.contains("academic") ||
+                                                combined.contains("acad") || combined.contains("គ្រូ") || combined.contains("បង្រៀន")) {
+                                                personType = "TEACHER";
+                                            } else {
+                                                personType = "STAFF";
+                                            }
+
+                                            personName = (emp.getKhmerName() != null ? emp.getKhmerName() + " (" : "") + emp.getEnglishName() + (emp.getKhmerName() != null ? ")" : "");
+                                            extraDetail = (posTitle.isBlank() ? "" : "តួនាទី: " + posTitle) +
+                                                          (deptName.isBlank() ? "" : (posTitle.isBlank() ? "" : " | ") + "ផ្នែក: " + deptName);
+                                        }
+                                    }
+                                }
+
+                                String branchName = device != null && device.getBranch() != null ? device.getBranch().getName() : "Main Branch";
+                                String devName = device != null ? device.getName() : "Terminal " + sn;
+
+                                telegramService.sendPunchNotification(personName, pin, personType, extraDetail, punchState, punchTime, branchName, devName);
+                            } catch (Exception ignored) {}
                         }
                     } catch (Exception ex) {
                         log.warn("Error parsing ADMS attendance line: '{}': {}", line, ex.getMessage());
@@ -211,8 +304,21 @@ public class ZKTecoPushService {
             dev.setConnectionStatus("ONLINE");
             dev.setLastCommunication(Instant.now());
             return deviceRepository.save(dev);
+        } else {
+            AttendanceDevice newDev = AttendanceDevice.builder()
+                    .serialNumber(sn.trim())
+                    .name("ZKTeco ADMS (" + sn.trim() + ")")
+                    .model("ADMS Terminal")
+                    .ipAddress("Cloud-Push")
+                    .port(80)
+                    .integrationType("ADMS_PUSH")
+                    .connectionStatus("ONLINE")
+                    .active(true)
+                    .lastCommunication(Instant.now())
+                    .build();
+            log.info("Auto-registered new ADMS terminal with SN={}", sn.trim());
+            return deviceRepository.save(newDev);
         }
-        return null;
     }
 
     private String parseStateCode(String code) {

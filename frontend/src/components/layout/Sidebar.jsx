@@ -19,6 +19,7 @@ import {
   ShieldCheck,
   History,
   Settings,
+  Database,
   ChevronLeft,
   ChevronRight,
   LogOut,
@@ -72,6 +73,7 @@ const NAV_SECTIONS = [
     title: "Administration",
     items: [
       { name: "Reports & Export", href: "/reports", icon: FileSpreadsheet },
+      { name: "Data Import & Roles", href: "/data-import", icon: Database },
       { name: "User Accounts", href: "/users", icon: ShieldCheck },
       { name: "Audit Trail", href: "/audit-logs", icon: History },
       { name: "System Settings", href: "/settings", icon: Settings },

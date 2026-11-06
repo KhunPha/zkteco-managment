@@ -1,5 +1,64 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ==========================================================================
+   SELF-HOSTED SYSTEM WEB FONTS (Offline & Device-Independent)
+   All fonts are bundled and served locally from the application web server.
+   Zero dependence on fonts installed on the user's computer or external CDNs.
+   ========================================================================== */
+
+/* Kantumruy Pro Variable - Khmer & Latin Typography (Weights 100 - 900) */
+@font-face {
+  font-family: 'Kantumruy Pro';
+  src: url('/fonts/KantumruyPro-Variable.ttf') format('truetype-variations'),
+       url('/fonts/KantumruyPro-Variable.ttf') format('truetype');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Kantumruy Pro';
+  src: url('/fonts/KantumruyPro-Italic-Variable.ttf') format('truetype-variations'),
+       url('/fonts/KantumruyPro-Italic-Variable.ttf') format('truetype');
+  font-weight: 100 900;
+  font-style: italic;
+  font-display: swap;
+}
+
+/* Inter Variable - Clean International Latin & Digits (Weights 100 - 900) */
+@font-face {
+  font-family: 'Inter';
+  src: url('/fonts/Inter-Variable.ttf') format('truetype-variations'),
+       url('/fonts/Inter-Variable.ttf') format('truetype');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Battambang - Classic Khmer Typography Fallback */
+@font-face {
+  font-family: 'Battambang';
+  src: url('/fonts/Battambang-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Battambang';
+  src: url('/fonts/Battambang-Bold.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@theme {
+  --font-sans: 'Kantumruy Pro', 'Inter', 'Battambang', sans-serif;
+  --font-khmer: 'Kantumruy Pro', 'Battambang', sans-serif;
+}
+
 :root {
   --background: #f8fafc;
   --foreground: #0f172a;
@@ -24,10 +83,18 @@
   --border: #334155;
 }
 
+html,
+body,
+button,
+input,
+select,
+textarea {
+  font-family: 'Kantumruy Pro', 'Inter', 'Battambang', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
 body {
   background-color: var(--background);
   color: var(--foreground);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   margin: 0;
   padding: 0;
 }

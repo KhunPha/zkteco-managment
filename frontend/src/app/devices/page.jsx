@@ -53,6 +53,18 @@ export default function DevicesPage() {
   const [showModal, setShowModal] = useState(false);
   const [actionFeedback, setActionFeedback] = useState(null);
 
+  // Network Scanner & Bulk Health Check states
+  const [isPingingAll, setIsPingingAll] = useState(false);
+  const [showScanModal, setShowScanModal] = useState(false);
+  const [scanForm, setScanForm] = useState({
+    subnet: "192.168.1",
+    startIp: 1,
+    endIp: 254,
+    port: 4370,
+  });
+  const [isScanning, setIsScanning] = useState(false);
+  const [scanResults, setScanResults] = useState(null);
+
   // Selected device for full hardware control modal
   const [controlDevice, setControlDevice] = useState(null);
   const [controlActionLoading, setControlActionLoading] = useState(false);
@@ -314,6 +326,79 @@ export default function DevicesPage() {
     setTimeout(() => setActionFeedback(null), 6000);
   };
 
+  const handlePingAll = async () => {
+    setIsPingingAll(true);
+    setActionFeedback({ text: "Pinging and checking all registered terminals...", type: "loading" });
+    try {
+      const res = await api.post("/api/v1/devices/ping-all");
+      const list = res.data?.data || [];
+      const onlineCount = list.filter((d) => d.online).length;
+      setActionFeedback({
+        text: `✓ Terminal Health Check: ${onlineCount}/${list.length} devices are ONLINE`,
+        type: onlineCount > 0 ? "success" : "warning",
+      });
+      queryClient.invalidateQueries(["devices"]);
+    } catch (err) {
+      setActionFeedback({
+        text: `✗ Health Check failed: ${err.response?.data?.message || err.message}`,
+        type: "error",
+      });
+    } finally {
+      setIsPingingAll(false);
+      setTimeout(() => setActionFeedback(null), 6000);
+    }
+  };
+
+  const handleBackupAndClear = async (device) => {
+    if (!confirm(`DOWNLOAD & WIPE BUFFER:\n\n1. Download all punch logs from "${device.name}" into database.\n2. Clear the terminal hardware memory to free space.\n\nProceed?`)) {
+      return;
+    }
+    setActionFeedback({ text: `Backing up and clearing memory buffer on ${device.name}...`, type: "loading" });
+    try {
+      const res = await api.post(`/api/v1/devices/${device.id}/backup-and-clear-logs`);
+      const data = res.data?.data;
+      setActionFeedback({
+        text: `✓ ${res.data?.message || `Backed up ${data?.downloadedCount} records and cleared memory.`}`,
+        type: "success",
+      });
+      queryClient.invalidateQueries(["devices"]);
+    } catch (err) {
+      setActionFeedback({
+        text: `✗ Backup & Wipe failed: ${err.response?.data?.message || err.message}`,
+        type: "error",
+      });
+    }
+    setTimeout(() => setActionFeedback(null), 7000);
+  };
+
+  const handleStartScan = async () => {
+    setIsScanning(true);
+    setScanResults(null);
+    try {
+      const res = await api.post("/api/v1/devices/scan-network", scanForm);
+      setScanResults(res.data?.data || []);
+    } catch (err) {
+      alert("Network scan failed: " + (err.response?.data?.message || err.message));
+    } finally {
+      setIsScanning(false);
+    }
+  };
+
+  const handleQuickAddDiscovered = (discovered) => {
+    setFormData({
+      name: `ZKTeco ${discovered.model || "Terminal"} (${discovered.ipAddress.split('.').pop()})`,
+      serialNumber: discovered.serialNumber || `SN-${discovered.ipAddress.replace(/\./g, '')}`,
+      model: discovered.model || "IN01-A/ID",
+      ipAddress: discovered.ipAddress,
+      port: discovered.port || 4370,
+      commKey: "0",
+      integrationType: "TCP_PULL",
+      location: "Discovered Device",
+    });
+    setShowScanModal(false);
+    setShowModal(true);
+  };
+
   const deleteDevice = async (id) => {
     if (!confirm("Are you sure you want to remove this device registration?")) return;
     try {
@@ -356,6 +441,27 @@ export default function DevicesPage() {
               <span>{actionFeedback.text}</span>
             </span>
           )}
+
+          {/* Ping All Devices Button */}
+          <button
+            onClick={handlePingAll}
+            disabled={isPingingAll}
+            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-sky-50 hover:bg-sky-100 dark:bg-sky-950/40 dark:hover:bg-sky-900/60 text-sky-700 dark:text-sky-300 font-bold text-xs transition-all border border-sky-200 dark:border-sky-800 shadow-2xs hover-lift active:scale-95 disabled:opacity-50"
+            title="Ping and test health status of all registered terminals simultaneously"
+          >
+            <Activity size={15} className={`text-sky-600 dark:text-sky-400 ${isPingingAll ? "animate-spin" : ""}`} />
+            <span>{isPingingAll ? "Pinging..." : "Ping All"}</span>
+          </button>
+
+          {/* Auto-Discovery Network Scanner Button */}
+          <button
+            onClick={() => setShowScanModal(true)}
+            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 dark:hover:bg-purple-900/60 text-purple-700 dark:text-purple-300 font-bold text-xs transition-all border border-purple-200 dark:border-purple-800 shadow-2xs hover-lift active:scale-95"
+            title="Scan local subnet to auto-discover ZKTeco terminals with 1-click registration"
+          >
+            <Radio size={15} className="text-purple-600 dark:text-purple-400" />
+            <span>Scan Network</span>
+          </button>
 
           {/* Sync All Clocks Button */}
           <button
@@ -533,6 +639,15 @@ export default function DevicesPage() {
                             title="Download Attendance Logs"
                           >
                             <Download size={15} />
+                          </button>
+
+                          {/* Backup & Wipe Buffer */}
+                          <button
+                            onClick={() => handleBackupAndClear(device)}
+                            className="p-1.5 rounded-xl text-purple-600 hover:bg-purple-50 dark:hover:bg-purple-950/40 hover:scale-110 active:scale-95 transition-all"
+                            title="Download and Wipe Terminal Memory Buffer (Free Hardware Storage)"
+                          >
+                            <HardDrive size={15} />
                           </button>
 
                           {/* Reboot Terminal */}
@@ -1552,6 +1667,169 @@ export default function DevicesPage() {
   )}
 
       {/* Modal Dialog: Register Terminal */}
+      {/* Network Auto-Discovery Scanner Modal */}
+      {showScanModal && (
+        <Portal>
+          <div className="fixed inset-0 z-[9999] overflow-y-auto bg-slate-950/75 backdrop-blur-md animate-in fade-in duration-200">
+            <div className="min-h-full flex items-center justify-center p-2 sm:p-4">
+              <div className="w-full max-w-2xl my-auto max-h-[90vh] flex flex-col bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200/80 dark:border-slate-800 overflow-hidden animate-in zoom-in-95 duration-200">
+                <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-800 shrink-0">
+                  <div className="flex items-center gap-2.5">
+                    <div className="p-2 rounded-xl bg-purple-50 dark:bg-purple-950/60 text-purple-600 dark:text-purple-400">
+                      <Radio size={18} />
+                    </div>
+                    <div>
+                      <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                        ZKTeco Auto-Discovery & Network Scanner
+                      </h3>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Scan your local network subnet to automatically discover ZKTeco biometric terminals
+                      </p>
+                    </div>
+                  </div>
+                  <button onClick={() => setShowScanModal(false)} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-lg cursor-pointer">✕</button>
+                </div>
+
+                <div className="p-6 space-y-4 flex-1 overflow-y-auto">
+                  {/* Scan Controls */}
+                  <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700/80 grid grid-cols-1 sm:grid-cols-4 gap-3 text-xs">
+                    <div className="sm:col-span-2">
+                      <label className="font-bold text-slate-700 dark:text-slate-300 block mb-1">Subnet Range</label>
+                      <input
+                        type="text"
+                        value={scanForm.subnet}
+                        onChange={(e) => setScanForm({ ...scanForm, subnet: e.target.value })}
+                        placeholder="192.168.1"
+                        className="w-full px-3 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 font-mono font-medium"
+                      />
+                    </div>
+                    <div>
+                      <label className="font-bold text-slate-700 dark:text-slate-300 block mb-1">Start IP</label>
+                      <input
+                        type="number"
+                        min="1"
+                        max="254"
+                        value={scanForm.startIp}
+                        onChange={(e) => setScanForm({ ...scanForm, startIp: Number(e.target.value) })}
+                        className="w-full px-3 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 font-mono font-medium"
+                      />
+                    </div>
+                    <div>
+                      <label className="font-bold text-slate-700 dark:text-slate-300 block mb-1">End IP</label>
+                      <input
+                        type="number"
+                        min="1"
+                        max="254"
+                        value={scanForm.endIp}
+                        onChange={(e) => setScanForm({ ...scanForm, endIp: Number(e.target.value) })}
+                        className="w-full px-3 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 font-mono font-medium"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-slate-500">
+                      Scanning port <code className="font-mono font-bold text-purple-600">4370</code> across {scanForm.subnet}.{scanForm.startIp} - {scanForm.subnet}.{scanForm.endIp}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={isScanning}
+                      onClick={handleStartScan}
+                      className="px-5 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs shadow-md transition-all flex items-center gap-2 disabled:opacity-50 cursor-pointer"
+                    >
+                      <Radio size={14} className={isScanning ? "animate-spin" : ""} />
+                      <span>{isScanning ? "Scanning Subnet..." : "Start Network Scan"}</span>
+                    </button>
+                  </div>
+
+                  {/* Results Section */}
+                  {isScanning && (
+                    <div className="py-12 flex flex-col items-center justify-center space-y-3">
+                      <div className="w-12 h-12 rounded-full border-4 border-purple-500 border-t-transparent animate-spin" />
+                      <p className="text-xs font-semibold text-slate-600 dark:text-slate-400">
+                        Probing ZKTeco biometric sockets across {scanForm.subnet}.* in parallel...
+                      </p>
+                    </div>
+                  )}
+
+                  {!isScanning && scanResults !== null && (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-bold text-slate-900 dark:text-white">
+                          Discovered Terminals ({scanResults.length})
+                        </span>
+                        {scanResults.length === 0 && (
+                          <span className="text-amber-600 dark:text-amber-400">
+                            No devices responded on port 4370 in this range.
+                          </span>
+                        )}
+                      </div>
+
+                      {scanResults.length > 0 && (
+                        <div className="space-y-2">
+                          {scanResults.map((dev) => (
+                            <div
+                              key={dev.ipAddress}
+                              className="p-3.5 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/70 flex items-center justify-between gap-3"
+                            >
+                              <div className="flex items-center gap-3 min-w-0">
+                                <div className="p-2 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 shrink-0">
+                                  <Cpu size={18} />
+                                </div>
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-bold text-xs text-slate-900 dark:text-white">
+                                      {dev.ipAddress}:{dev.port}
+                                    </span>
+                                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-700 font-mono text-slate-600 dark:text-slate-300">
+                                      {dev.responseTimeMs}ms
+                                    </span>
+                                    {dev.alreadyRegistered && (
+                                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 font-semibold">
+                                        Registered ({dev.existingDeviceName})
+                                      </span>
+                                    )}
+                                  </div>
+                                  <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                                    {dev.model || "ZKTeco Terminal"} • SN: {dev.serialNumber} • FW: {dev.firmwareVersion}
+                                  </p>
+                                </div>
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={() => handleQuickAddDiscovered(dev)}
+                                className={`px-3 py-1.5 rounded-xl font-bold text-xs shrink-0 transition-all cursor-pointer ${
+                                  dev.alreadyRegistered
+                                    ? "bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-200"
+                                    : "bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm"
+                                }`}
+                              >
+                                {dev.alreadyRegistered ? "Edit Registration" : "+ Quick Register"}
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="px-6 py-3.5 bg-slate-50/80 dark:bg-slate-800/50 border-t border-slate-100 dark:border-slate-800 flex justify-end shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setShowScanModal(false)}
+                    className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 font-semibold text-xs hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </Portal>
+      )}
+
       {showModal && (
         <Portal>
           <div className="fixed inset-0 z-[9999] overflow-y-auto bg-slate-950/75 backdrop-blur-md animate-in fade-in duration-200">

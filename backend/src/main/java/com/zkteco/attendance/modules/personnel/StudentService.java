@@ -84,7 +84,11 @@ public class StudentService {
         if (code == null || code.trim().isEmpty()) {
             code = personnelCodeGeneratorService.generateNextUniqueCode();
         } else {
-            code = code.trim().toUpperCase();
+            // Enforce purely numeric codes (no letters or special characters)
+            code = code.trim().replaceAll("[^0-9]", "");
+            if (code.isEmpty()) {
+                code = personnelCodeGeneratorService.generateNextUniqueCode();
+            }
             if (studentRepository.existsByStudentCodeAndDeletedAtIsNull(code)) {
                 throw new AppException(ErrorCode.DUPLICATE_RESOURCE, "Student code already exists: " + code);
             }
@@ -119,8 +123,8 @@ public class StudentService {
                 .orElseThrow(() -> new ResourceNotFoundException("Student", "id", id));
 
         if (request.getStudentCode() != null && !request.getStudentCode().trim().isEmpty()) {
-            String newCode = request.getStudentCode().trim().toUpperCase();
-            if (!newCode.equalsIgnoreCase(s.getStudentCode())) {
+            String newCode = request.getStudentCode().trim().replaceAll("[^0-9]", "");
+            if (!newCode.isEmpty() && !newCode.equalsIgnoreCase(s.getStudentCode())) {
                 if (studentRepository.existsByStudentCodeAndDeletedAtIsNull(newCode)) {
                     throw new AppException(ErrorCode.DUPLICATE_RESOURCE, "Student code already exists: " + newCode);
                 }

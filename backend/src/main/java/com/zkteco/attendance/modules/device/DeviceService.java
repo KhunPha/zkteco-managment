@@ -31,15 +31,23 @@ import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -61,6 +69,7 @@ public class DeviceService {
     private final CardHistoryRepository cardHistoryRepository;
     private final TerminalSyncService terminalSyncService;
     private final ZkDeviceMasterControlService masterControlService;
+    private final com.zkteco.attendance.modules.system.TelegramNotificationService telegramService;
 
     // Devices CRUD
     @Transactional(readOnly = true)
@@ -157,14 +166,16 @@ public class DeviceService {
         AttendanceDevice device = findDevice(id);
         boolean reachable = false;
 
-        // First attempt direct TCP probe via master control utility if IP is present
+        // Try direct high-speed native TCP probe first
         if (device.getIpAddress() != null && !device.getIpAddress().isBlank()) {
-            JsonNode info = masterControlService.execute(device.getIpAddress(), device.getPort(), "get-info", null);
-            if (info != null && info.path("success").asBoolean(false)) {
-                reachable = true;
-                if (info.hasNonNull("firmware_version") && !info.path("firmware_version").asText().isBlank()) {
-                    device.setFirmwareVersion(info.path("firmware_version").asText());
-                }
+            reachable = tcpClient.testConnection(device.getIpAddress(), device.getPort(), device.getCommKey());
+            if (reachable) {
+                try {
+                    DeviceInfo devInfo = tcpClient.getDeviceInfo(device.getIpAddress(), device.getPort(), device.getCommKey());
+                    if (devInfo != null && devInfo.getFirmwareVersion() != null && !devInfo.getFirmwareVersion().isBlank()) {
+                        device.setFirmwareVersion(devInfo.getFirmwareVersion());
+                    }
+                } catch (Exception ignored) {}
             }
         }
 
@@ -179,15 +190,9 @@ public class DeviceService {
                     reachable = true;
                 } else if (device.getSerialNumber() != null && device.getSerialNumber().startsWith("ZK-SIM")) {
                     reachable = true;
-                } else if (device.getIpAddress() != null && !device.getIpAddress().isBlank()) {
-                    reachable = tcpClient.testConnection(device.getIpAddress(), device.getPort(), device.getCommKey());
                 }
-            } else {
-                if (device.getIpAddress() != null && !device.getIpAddress().isBlank()) {
-                    reachable = tcpClient.testConnection(device.getIpAddress(), device.getPort(), device.getCommKey());
-                } else if (device.getSerialNumber() != null && device.getSerialNumber().startsWith("ZK-SIM")) {
-                    reachable = true;
-                }
+            } else if (device.getSerialNumber() != null && device.getSerialNumber().startsWith("ZK-SIM")) {
+                reachable = true;
             }
         }
 
@@ -211,19 +216,33 @@ public class DeviceService {
         String computerTime = null;
 
         if (device.getIpAddress() != null && !device.getIpAddress().isBlank()) {
-            JsonNode res = masterControlService.execute(device.getIpAddress(), device.getPort(), "sync-time", null);
-            if (res != null && res.path("success").asBoolean(false)) {
+            boolean tcpOk = tcpClient.syncDeviceTime(device.getIpAddress(), device.getPort(), device.getCommKey(), Instant.now());
+            if (tcpOk) {
+                Instant devTime = tcpClient.getDeviceTime(device.getIpAddress(), device.getPort(), device.getCommKey());
                 success = true;
-                message = res.path("message").asText("Hardware clock synchronized successfully");
-                drift = res.hasNonNull("drift_seconds") ? res.path("drift_seconds").asDouble() : 0.0;
-                machineTime = res.path("machine_time").asText(null);
-                computerTime = res.path("computer_time").asText(null);
+                message = "Hardware clock synchronized successfully to " + TimeUtils.formatPhnomPenh(Instant.now());
+                drift = Math.abs(java.time.Duration.between(Instant.now(), devTime).toMillis() / 1000.0);
+                machineTime = TimeUtils.formatPhnomPenh(devTime);
+                computerTime = TimeUtils.formatPhnomPenh(Instant.now());
 
                 device.setConnectionStatus("ONLINE");
                 device.setLastCommunication(Instant.now());
                 deviceRepository.save(device);
             } else {
-                message = res != null && res.hasNonNull("message") ? res.path("message").asText() : "TCP sync failed";
+                JsonNode res = masterControlService.execute(device.getIpAddress(), device.getPort(), "sync-time", null);
+                if (res != null && res.path("success").asBoolean(false)) {
+                    success = true;
+                    message = res.path("message").asText("Hardware clock synchronized successfully");
+                    drift = res.hasNonNull("drift_seconds") ? res.path("drift_seconds").asDouble() : 0.0;
+                    machineTime = res.path("machine_time").asText(null);
+                    computerTime = res.path("computer_time").asText(null);
+
+                    device.setConnectionStatus("ONLINE");
+                    device.setLastCommunication(Instant.now());
+                    deviceRepository.save(device);
+                } else {
+                    message = res != null && res.hasNonNull("message") ? res.path("message").asText() : "TCP sync failed";
+                }
             }
         }
 
@@ -286,6 +305,36 @@ public class DeviceService {
         AttendanceDevice device = findDevice(id);
 
         if (device.getIpAddress() != null && !device.getIpAddress().isBlank()) {
+            DeviceInfo dInfo = tcpClient.getDeviceInfo(device.getIpAddress(), device.getPort(), device.getCommKey());
+            if (dInfo != null) {
+                Instant devTime = tcpClient.getDeviceTime(device.getIpAddress(), device.getPort(), device.getCommKey());
+                device.setConnectionStatus("ONLINE");
+                if (dInfo.getFirmwareVersion() != null && !dInfo.getFirmwareVersion().isBlank()) {
+                    device.setFirmwareVersion(dInfo.getFirmwareVersion());
+                }
+                device.setLastCommunication(Instant.now());
+                deviceRepository.save(device);
+
+                double drift = Math.abs(java.time.Duration.between(Instant.now(), devTime).toMillis() / 1000.0);
+
+                return DeviceLiveStatusDto.builder()
+                        .deviceId(device.getId())
+                        .deviceName(device.getName())
+                        .serialNumber(device.getSerialNumber())
+                        .ipAddress(device.getIpAddress())
+                        .port(device.getPort())
+                        .online(true)
+                        .machineTime(TimeUtils.formatPhnomPenh(devTime))
+                        .computerTime(TimeUtils.formatPhnomPenh(Instant.now()))
+                        .driftSeconds(drift)
+                        .usersCount((int) deviceUserRepository.countByDeviceId(device.getId()))
+                        .attendanceCount((int) rawLogRepository.count())
+                        .firmwareVersion(dInfo.getFirmwareVersion())
+                        .platform(dInfo.getModel())
+                        .message("Live hardware status retrieved")
+                        .build();
+            }
+
             JsonNode info = masterControlService.execute(device.getIpAddress(), device.getPort(), "get-info", null);
             if (info != null && info.path("success").asBoolean(false)) {
                 device.setConnectionStatus("ONLINE");
@@ -353,10 +402,59 @@ public class DeviceService {
         String message = "";
 
         if (device.getIpAddress() != null && !device.getIpAddress().isBlank()) {
-            JsonNode res = masterControlService.execute(device.getIpAddress(), device.getPort(), command, request.getVoiceIndex());
-            if (res != null) {
-                success = res.path("success").asBoolean(false);
-                message = res.path("message").asText(success ? "Operation completed" : "Operation failed");
+            // 1. Try native high-performance Java TCP protocol implementation first
+            try {
+                switch (action) {
+                    case "TEST_VOICE" -> {
+                        int vIdx = request.getVoiceIndex() != null ? request.getVoiceIndex() : 0;
+                        success = tcpClient.testVoice(device.getIpAddress(), device.getPort(), device.getCommKey(), vIdx);
+                        message = success
+                                ? "Played voice prompt ('Thank You!') on " + device.getName() + " (" + device.getIpAddress() + ")"
+                                : "Device at " + device.getIpAddress() + ":" + device.getPort() + " did not respond to voice test packet (offline or unreachable)";
+                    }
+                    case "RESTART" -> {
+                        success = tcpClient.restartDevice(device.getIpAddress(), device.getPort(), device.getCommKey());
+                        message = success
+                                ? "Restart command acknowledged by " + device.getName()
+                                : "Device at " + device.getIpAddress() + ":" + device.getPort() + " is offline or unreachable";
+                    }
+                    case "POWER_OFF" -> {
+                        success = tcpClient.powerOffDevice(device.getIpAddress(), device.getPort(), device.getCommKey());
+                        message = success
+                                ? "Power off command acknowledged by " + device.getName()
+                                : "Device at " + device.getIpAddress() + ":" + device.getPort() + " is offline or unreachable";
+                    }
+                    case "ENABLE" -> {
+                        success = tcpClient.enableDevice(device.getIpAddress(), device.getPort(), device.getCommKey());
+                        message = success ? "Device enabled successfully" : "Failed to enable device";
+                    }
+                    case "DISABLE" -> {
+                        success = tcpClient.disableDevice(device.getIpAddress(), device.getPort(), device.getCommKey());
+                        message = success ? "Device disabled successfully" : "Failed to disable device";
+                    }
+                    case "CLEAR_ADMIN" -> {
+                        success = tcpClient.clearAdmin(device.getIpAddress(), device.getPort(), device.getCommKey());
+                        message = success ? "Administrator lock cleared on device" : "Failed to clear admin lock";
+                    }
+                    case "UNLOCK_DOOR" -> {
+                        int sec = request.getVoiceIndex() != null && request.getVoiceIndex() > 0 ? request.getVoiceIndex() : 3;
+                        success = tcpClient.unlockDoor(device.getIpAddress(), device.getPort(), device.getCommKey(), sec);
+                        message = success ? "Door relay triggered for " + sec + "s" : "Failed to trigger door relay";
+                    }
+                }
+            } catch (Exception ex) {
+                log.warn("Native Java TCP execution encountered error: {}", ex.getMessage());
+            }
+
+            // 2. Fallback to master control service if needed
+            if (!success) {
+                try {
+                    JsonNode res = masterControlService.execute(device.getIpAddress(), device.getPort(), command, request.getVoiceIndex());
+                    if (res != null && res.path("success").asBoolean(false)) {
+                        success = true;
+                        message = res.path("message").asText(message.isEmpty() ? "Operation completed" : message);
+                    }
+                } catch (Exception ignored) {}
             }
         }
 
@@ -411,6 +509,13 @@ public class DeviceService {
                             .build();
                     rawLogRepository.save(logEntry);
                     inserted++;
+
+                    // Dispatch Telegram alert for live/recent punches (within last 2 hours)
+                    if (r.getPunchTime() != null && r.getPunchTime().isAfter(Instant.now().minus(java.time.Duration.ofHours(2)))) {
+                        try {
+                            notifyTelegramForPunch(device, r.getUserPin(), r.getPunchState(), r.getPunchTime());
+                        } catch (Exception ignored) {}
+                    }
                 }
             }
 
@@ -454,6 +559,165 @@ public class DeviceService {
         AttendanceDevice device = findDevice(id);
         JsonNode result = masterControlService.setMenuParameters(device.getIpAddress(), device.getPort(), params);
         recordOperation(device, "SET_MENU_PARAMETERS", "Params: " + params, result != null && result.path("success").asBoolean(false) ? "SUCCESS" : "FAILED", null);
+        return result;
+    }
+
+    public List<DiscoveredDeviceDto> scanNetwork(NetworkScanRequest request) {
+        String subnet = request.getSubnet() != null && !request.getSubnet().isBlank()
+                ? request.getSubnet().trim()
+                : "192.168.1";
+        if (subnet.endsWith(".")) {
+            subnet = subnet.substring(0, subnet.length() - 1);
+        }
+
+        int start = Math.max(1, request.getStartIp());
+        int end = Math.min(254, Math.max(start, request.getEndIp()));
+        int port = request.getPort() > 0 ? request.getPort() : 4370;
+        int timeout = request.getTimeoutMs() > 50 ? request.getTimeoutMs() : 300;
+
+        List<AttendanceDevice> existingDevices = deviceRepository.findAll();
+        HashMap<String, AttendanceDevice> ipMap = new HashMap<>();
+        HashMap<String, AttendanceDevice> snMap = new HashMap<>();
+        for (AttendanceDevice d : existingDevices) {
+            if (d.getIpAddress() != null) ipMap.put(d.getIpAddress().trim(), d);
+            if (d.getSerialNumber() != null) snMap.put(d.getSerialNumber().trim(), d);
+        }
+
+        List<DiscoveredDeviceDto> results = Collections.synchronizedList(new ArrayList<>());
+        ExecutorService executor = Executors.newFixedThreadPool(40);
+        List<CompletableFuture<Void>> futures = new ArrayList<>();
+
+        for (int i = start; i <= end; i++) {
+            final String targetIp = subnet + "." + i;
+            futures.add(CompletableFuture.runAsync(() -> {
+                long t0 = System.currentTimeMillis();
+                try (Socket socket = new Socket()) {
+                    socket.connect(new InetSocketAddress(targetIp, port), timeout);
+                    socket.setSoTimeout(1000);
+                    long responseTime = System.currentTimeMillis() - t0;
+
+                    DeviceInfo info = tcpClient.getDeviceInfo(targetIp, port, "0");
+                    String sn = info != null && info.getModel() != null ? info.getModel() : "ZKTeco-" + targetIp.replace(".", "-");
+                    String fw = info != null ? info.getFirmwareVersion() : "Ver 1.0.0";
+                    String model = info != null ? info.getModel() : "ZKTeco Terminal";
+
+                    AttendanceDevice existing = ipMap.get(targetIp);
+                    if (existing == null && info != null) {
+                        existing = snMap.get(sn);
+                    }
+
+                    results.add(DiscoveredDeviceDto.builder()
+                            .ipAddress(targetIp)
+                            .port(port)
+                            .serialNumber(existing != null ? existing.getSerialNumber() : sn)
+                            .model(model)
+                            .firmwareVersion(fw)
+                            .responseTimeMs(responseTime)
+                            .alreadyRegistered(existing != null)
+                            .existingDeviceId(existing != null ? existing.getId() : null)
+                            .existingDeviceName(existing != null ? existing.getName() : null)
+                            .build());
+                } catch (Exception ignored) {
+                }
+            }, executor));
+        }
+
+        try {
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+        } finally {
+            executor.shutdown();
+        }
+
+        results.sort((a, b) -> {
+            try {
+                int aLast = Integer.parseInt(a.getIpAddress().substring(a.getIpAddress().lastIndexOf('.') + 1));
+                int bLast = Integer.parseInt(b.getIpAddress().substring(b.getIpAddress().lastIndexOf('.') + 1));
+                return Integer.compare(aLast, bLast);
+            } catch (Exception e) {
+                return a.getIpAddress().compareTo(b.getIpAddress());
+            }
+        });
+
+        return results;
+    }
+
+    @Transactional
+    public List<java.util.Map<String, Object>> pingAllDevices() {
+        List<AttendanceDevice> devices = deviceRepository.findAll().stream()
+                .filter(AttendanceDevice::isActive)
+                .toList();
+
+        List<java.util.Map<String, Object>> results = Collections.synchronizedList(new ArrayList<>());
+        ExecutorService executor = Executors.newFixedThreadPool(15);
+        List<CompletableFuture<Void>> futures = new ArrayList<>();
+
+        for (AttendanceDevice device : devices) {
+            futures.add(CompletableFuture.runAsync(() -> {
+                boolean online = false;
+                if (device.getIpAddress() != null && !device.getIpAddress().isBlank()) {
+                    online = tcpClient.testConnection(device.getIpAddress(), device.getPort(), device.getCommKey());
+                } else if ("ADMS_PUSH".equalsIgnoreCase(device.getIntegrationType())) {
+                    online = device.getLastCommunication() != null &&
+                            device.getLastCommunication().isAfter(Instant.now().minus(java.time.Duration.ofMinutes(3)));
+                }
+
+                device.setConnectionStatus(online ? "ONLINE" : "OFFLINE");
+                if (online) {
+                    device.setLastCommunication(Instant.now());
+                }
+                deviceRepository.save(device);
+
+                java.util.Map<String, Object> map = new LinkedHashMap<>();
+                map.put("id", device.getId());
+                map.put("name", device.getName());
+                map.put("serialNumber", device.getSerialNumber());
+                map.put("ipAddress", device.getIpAddress());
+                map.put("status", online ? "ONLINE" : "OFFLINE");
+                map.put("online", online);
+                map.put("lastCommunication", device.getLastCommunication() != null ? device.getLastCommunication().toString() : null);
+                results.add(map);
+            }, executor));
+        }
+
+        try {
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+        } finally {
+            executor.shutdown();
+        }
+
+        results.sort(Comparator.comparing(m -> String.valueOf(m.get("name"))));
+        return results;
+    }
+
+    @Transactional
+    public java.util.Map<String, Object> backupAndClearDeviceLogs(Long id) {
+        AttendanceDevice device = findDevice(id);
+        int downloadedCount = pullAttendanceLogs(id);
+        boolean cleared = false;
+        String message;
+
+        if (device.getIpAddress() != null && !device.getIpAddress().isBlank()) {
+            cleared = tcpClient.clearAttendanceLogs(device.getIpAddress(), device.getPort(), device.getCommKey());
+            message = cleared
+                    ? "Successfully backed up " + downloadedCount + " punch records and cleared device memory buffer."
+                    : "Backed up " + downloadedCount + " records, but device did not acknowledge memory clear command.";
+        } else if ("ADMS_PUSH".equalsIgnoreCase(device.getIntegrationType())) {
+            queueCommand(device, "CLEAR LOG");
+            cleared = true;
+            message = "Backed up " + downloadedCount + " records and queued ADMS CLEAR LOG command.";
+        } else {
+            message = "Backed up " + downloadedCount + " records. Device memory clear not supported for this integration type.";
+        }
+
+        recordOperation(device, "BACKUP_AND_CLEAR_LOGS", "Downloaded=" + downloadedCount + " Cleared=" + cleared,
+                cleared ? "SUCCESS" : "WARNING", cleared ? null : message);
+
+        java.util.Map<String, Object> result = new LinkedHashMap<>();
+        result.put("deviceId", device.getId());
+        result.put("deviceName", device.getName());
+        result.put("downloadedCount", downloadedCount);
+        result.put("cleared", cleared);
+        result.put("message", message);
         return result;
     }
 
@@ -1163,5 +1427,86 @@ public class DeviceService {
                 .status(status)
                 .lastSyncedAt(u.getLastSyncedAt())
                 .build();
+    }
+
+    private void notifyTelegramForPunch(AttendanceDevice device, String pin, String punchState, Instant punchTime) {
+        if (telegramService == null || !telegramService.isEnabled()) return;
+        String personName = "User " + pin;
+        String personType = "STAFF";
+        String extraDetail = null;
+
+        Optional<AttendanceDeviceUser> devUserOpt = deviceUserRepository.findByDeviceIdAndDevicePin(device.getId(), pin);
+        if (devUserOpt.isPresent()) {
+            AttendanceDeviceUser u = devUserOpt.get();
+            if (u.getNameOnDevice() != null && !u.getNameOnDevice().isBlank()) {
+                personName = u.getNameOnDevice();
+            }
+
+            if (u.getStudent() != null) {
+                personType = "STUDENT";
+                Student s = u.getStudent();
+                if (s.getKhmerName() != null && !s.getKhmerName().isBlank()) {
+                    personName = s.getKhmerName() + " (" + s.getEnglishName() + ")";
+                } else if (s.getEnglishName() != null) {
+                    personName = s.getEnglishName();
+                }
+                extraDetail = "ថ្នាក់ (Class): " + (s.getClassName() != null ? s.getClassName() : "N/A");
+            } else if (u.getEmployee() != null) {
+                Employee emp = u.getEmployee();
+                if (emp.getKhmerName() != null && !emp.getKhmerName().isBlank()) {
+                    personName = emp.getKhmerName() + " (" + emp.getEnglishName() + ")";
+                } else if (emp.getEnglishName() != null) {
+                    personName = emp.getEnglishName();
+                }
+
+                String posTitle = emp.getPosition() != null ? emp.getPosition().getTitle() : "";
+                String deptName = emp.getDepartment() != null ? emp.getDepartment().getName() : "";
+                String combined = (posTitle + " " + deptName).toLowerCase();
+
+                if (combined.contains("teacher") || combined.contains("teach") ||
+                    combined.contains("lecturer") || combined.contains("professor") ||
+                    combined.contains("instructor") || combined.contains("academic") ||
+                    combined.contains("acad") || combined.contains("គ្រូ") || combined.contains("បង្រៀន")) {
+                    personType = "TEACHER";
+                } else {
+                    personType = "STAFF";
+                }
+                extraDetail = (posTitle.isBlank() ? "" : "តួនាទី: " + posTitle) +
+                              (deptName.isBlank() ? "" : (posTitle.isBlank() ? "" : " | ") + "ផ្នែក: " + deptName);
+            }
+        } else {
+            Optional<Student> studentOpt = studentRepository.findByStudentCodeAndDeletedAtIsNull(pin);
+            if (studentOpt.isPresent()) {
+                Student s = studentOpt.get();
+                personType = "STUDENT";
+                personName = (s.getKhmerName() != null ? s.getKhmerName() + " (" : "") + s.getEnglishName() + (s.getKhmerName() != null ? ")" : "");
+                extraDetail = "ថ្នាក់ (Class): " + (s.getClassName() != null ? s.getClassName() : "N/A");
+            } else {
+                Optional<Employee> empOpt = employeeRepository.findByEmployeeCodeAndDeletedAtIsNull(pin);
+                if (empOpt.isPresent()) {
+                    Employee emp = empOpt.get();
+                    String posTitle = emp.getPosition() != null ? emp.getPosition().getTitle() : "";
+                    String deptName = emp.getDepartment() != null ? emp.getDepartment().getName() : "";
+                    String combined = (posTitle + " " + deptName).toLowerCase();
+
+                    if (combined.contains("teacher") || combined.contains("teach") ||
+                        combined.contains("lecturer") || combined.contains("professor") ||
+                        combined.contains("instructor") || combined.contains("academic") ||
+                        combined.contains("acad") || combined.contains("គ្រូ") || combined.contains("បង្រៀន")) {
+                        personType = "TEACHER";
+                    } else {
+                        personType = "STAFF";
+                    }
+                    personName = (emp.getKhmerName() != null ? emp.getKhmerName() + " (" : "") + emp.getEnglishName() + (emp.getKhmerName() != null ? ")" : "");
+                    extraDetail = (posTitle.isBlank() ? "" : "តួនាទី: " + posTitle) +
+                                  (deptName.isBlank() ? "" : (posTitle.isBlank() ? "" : " | ") + "ផ្នែក: " + deptName);
+                }
+            }
+        }
+
+        String branchName = device.getBranch() != null ? device.getBranch().getName() : "Main Branch";
+        String devName = device.getName();
+
+        telegramService.sendPunchNotification(personName, pin, personType, extraDetail, punchState, punchTime, branchName, devName);
     }
 }

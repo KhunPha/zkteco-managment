@@ -82,8 +82,8 @@ pipeline {
                 echo 'Verifying container and service endpoints...'
                 sleep 10
                 sh '''
-                    curl -s -f http://localhost:8080/actuator/health || exit 1
-                    curl -s -f http://localhost:3000/login || exit 1
+                    curl -s -f http://localhost:8484/actuator/health || exit 1
+                    curl -s -f http://localhost:3131/login || exit 1
                     echo "All services healthy!"
                 '''
             }

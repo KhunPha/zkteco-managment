@@ -75,7 +75,7 @@ Physical biometric terminals are embedded IoT devices running Linux or RTOS firm
 - Biometric terminals must be connected to a dedicated **VLAN** (e.g., `192.168.100.0/24`).
 - **Firewall Rules**:
   - Inbound traffic to terminals: Only the Spring Boot application server is permitted to initiate connections on TCP port `4370`.
-  - Outbound traffic from terminals: Only destination port `8080` (or `443` via Nginx) on the application server is allowed. No direct internet access.
+  - Outbound traffic from terminals: Only destination port `8484` (or `80` / `443` via Nginx) on the application server is allowed. No direct internet access.
 
 ### 3.2. Device Communication Keys
 - All terminals must have a non-default **Communication Key** (`Comm Key`) configured in device hardware settings.

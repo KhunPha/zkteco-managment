@@ -17,11 +17,13 @@ import {
   Briefcase,
   Calendar,
   X,
+  Camera,
 } from "lucide-react";
 import api from "@/lib/api";
 import { formatDate } from "@/lib/utils";
 import ImageUploadDropzone from "@/components/common/ImageUploadDropzone";
 import Portal from "@/components/common/Portal";
+import WebcamFaceEnrollModal from "@/components/biometrics/WebcamFaceEnrollModal";
 
 export default function TeachersPage() {
   const queryClient = useQueryClient();
@@ -31,6 +33,7 @@ export default function TeachersPage() {
   const [pageSize, setPageSize] = useState(25);
   const [showModal, setShowModal] = useState(false);
   const [editingTeacherId, setEditingTeacherId] = useState(null);
+  const [faceEnrollPerson, setFaceEnrollPerson] = useState(null);
 
   const initialForm = {
     employeeCode: "",
@@ -389,6 +392,24 @@ export default function TeachersPage() {
                     <td className="py-3 px-4 text-right">
                       <div className="flex items-center justify-end gap-1">
                         <button
+                          type="button"
+                          onClick={() =>
+                            setFaceEnrollPerson({
+                              id: t.id,
+                              code: t.employeeCode,
+                              name: t.englishName,
+                              khmerName: t.khmerName,
+                              type: "TEACHER",
+                              departmentOrClass: "Faculty / Teacher",
+                              photoUrl: t.profileImageUrl,
+                            })
+                          }
+                          className="p-1.5 text-emerald-600 hover:text-emerald-700 rounded-lg hover:bg-emerald-50 dark:hover:bg-emerald-950/40 transition-colors"
+                          title="ចុះឈ្មោះ Face ID តាម Webcam (Enroll Face ID)"
+                        >
+                          <Camera size={15} />
+                        </button>
+                        <button
                           onClick={() => openEditModal(t)}
                           className="p-1.5 text-slate-400 hover:text-teal-600 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                           title="Edit Teacher"
@@ -696,6 +717,17 @@ export default function TeachersPage() {
         </div>
         </Portal>
       )}
+
+      {/* Webcam Face ID Enrollment Modal */}
+      <WebcamFaceEnrollModal
+        isOpen={Boolean(faceEnrollPerson)}
+        person={faceEnrollPerson}
+        onClose={() => setFaceEnrollPerson(null)}
+        onSuccess={() => {
+          queryClient.invalidateQueries(["teachers"]);
+          refetch();
+        }}
+      />
     </div>
   );
 }

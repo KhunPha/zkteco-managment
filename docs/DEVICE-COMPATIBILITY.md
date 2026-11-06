@@ -15,6 +15,6 @@
 ## 2. Firmware Compatibility Guidelines
 
 1. **ADMS Protocol Availability**: Ensure the terminal firmware includes the ADMS or Cloud Server module (typically standard in models manufactured after 2018 or enabled with ADMS firmware licenses).
-2. **Push Port Default**: While standalone TCP uses port 4370, ADMS push communicates over standard HTTP port 80 (or 8080/443).
+2. **Push Port Default**: While standalone TCP uses port 4370, ADMS push communicates over standard HTTP port 80 (or backend port 8484).
 3. **Biometric Template Synchronization**: Due to proprietary encryption vectors across different algorithm versions (e.g. ZKFinger 10.0 vs 9.0, ZKFace 7.0 vs Visible Light Face), biometric templates should be registered locally on terminals, with attendance logs centralized automatically in our PostgreSQL database.
 

@@ -16,6 +16,7 @@ import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/api/v1/devices")
@@ -160,6 +161,32 @@ public class DeviceController {
     public ResponseEntity<ApiResponse<Integer>> syncAllUsersAcrossAllDevices() {
         int total = deviceService.syncAllUsersAcrossAllDevices();
         return ResponseEntity.ok(ApiResponse.ok("Successfully synchronized personnel across all terminals (" + total + " records)", total));
+    }
+
+    @PostMapping("/scan-network")
+    @PreAuthorize("hasAuthority('device.create') or hasRole('SUPER_ADMIN') or hasRole('ADMIN')")
+    @Operation(summary = "Auto-discover ZKTeco terminals on local subnet range via parallel socket probing")
+    public ResponseEntity<ApiResponse<List<DiscoveredDeviceDto>>> scanNetwork(@RequestBody(required = false) NetworkScanRequest request) {
+        if (request == null) request = new NetworkScanRequest();
+        List<DiscoveredDeviceDto> discovered = deviceService.scanNetwork(request);
+        return ResponseEntity.ok(ApiResponse.ok("Network scan completed: found " + discovered.size() + " terminals", discovered));
+    }
+
+    @PostMapping("/ping-all")
+    @PreAuthorize("hasAuthority('device.read') or hasRole('SUPER_ADMIN') or hasRole('ADMIN')")
+    @Operation(summary = "Ping and refresh health status for all registered biometric terminals in parallel")
+    public ResponseEntity<ApiResponse<List<Map<String, Object>>>> pingAllDevices() {
+        List<Map<String, Object>> statuses = deviceService.pingAllDevices();
+        long onlineCount = statuses.stream().filter(m -> Boolean.TRUE.equals(m.get("online"))).count();
+        return ResponseEntity.ok(ApiResponse.ok("Checked " + statuses.size() + " devices: " + onlineCount + " Online", statuses));
+    }
+
+    @PostMapping("/{id}/backup-and-clear-logs")
+    @PreAuthorize("hasAuthority('device.sync') or hasRole('SUPER_ADMIN') or hasRole('ADMIN')")
+    @Operation(summary = "Download all attendance logs from terminal into database and wipe terminal buffer to free memory")
+    public ResponseEntity<ApiResponse<Map<String, Object>>> backupAndClearDeviceLogs(@PathVariable Long id) {
+        Map<String, Object> result = deviceService.backupAndClearDeviceLogs(id);
+        return ResponseEntity.ok(ApiResponse.ok((String) result.get("message"), result));
     }
 }
 

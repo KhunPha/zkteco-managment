@@ -90,6 +90,13 @@
   - `docs/DEPLOYMENT.md`
   - `docs/TROUBLESHOOTING.md`
 
+### Phase 7: System Administration, School MIS & Real-Time Alerts
+- **Telegram Attendance Bot (3-Group Multi-Channel Architecture)**:
+  - Multi-group live routing: Dedicated Telegram Channels/Groups for **Teachers** (`TELEGRAM_TEACHER_CHAT_ID`), **Staffs** (`TELEGRAM_STAFF_CHAT_ID`), and **Students** (`TELEGRAM_STUDENT_CHAT_ID`).
+  - Personnel type auto-detection: Ingested punches (ADMS `/iclock/cdata` or TCP pull) automatically resolve personnel type into Teacher, Staff, or Student with localized Khmer/English HTML badges and emojis.
+  - Granular event toggles and targeted live testing endpoints (`POST /api/v1/telegram/test?target=teacher|staff|student|all`).
+  - Native Zero-Python Java TCP/UDP Protocol engine: Direct hardware control, ping, network IP scanner, time synchronization, and terminal buffer backup & wipe (`CMD_CLEAR_ATTLOG = 44`).
+
 ---
 
 ## 3. Verification Summary
@@ -97,16 +104,17 @@
 | Component | Target Command | Result | Status |
 |---|---|---|:---:|
 | **Backend Java Test Suite** | `mvn test` in `/backend` | 9 Tests Run, 0 Failures, 0 Errors | **PASSED** |
-| **Frontend Production Build** | `npm run build` in `/frontend` | 22 Pages Prerendered, 0 Lint Errors | **PASSED** |
-| **Hardware Simulator** | `node zkteco_device_simulator.js` in `/simulator` | TCP Server listening on 4370, ADMS ready | **PASSED** |
-| **Database Migrations** | Flyway V1 through V6 | Validated SQL DDL, Foreign Keys & Constraints | **PASSED** |
+| **Frontend Production Build** | `npm run build` in `/frontend` | 25 Pages Prerendered, 0 Lint Errors | **PASSED** |
+| **Telegram 3-Group Dispatcher** | `/api/v1/telegram/test?target=...` | Verified Teacher, Staff, Student Routing | **PASSED** |
+| **Hardware Simulator & Protocol** | Native Java Client & Simulator | TCP Server listening on 4370, ADMS ready | **PASSED** |
+| **Database Migrations** | Flyway V1 through V11 | Validated SQL DDL, Foreign Keys & Constraints | **PASSED** |
 
 ---
 
 ## 4. Default Production Credentials
 
-- **Web Dashboard**: `http://localhost:3000`
-- **Backend API**: `http://localhost:8080/api/v1`
-- **Swagger Documentation**: `http://localhost:8080/swagger-ui.html`
+- **Web Dashboard**: `http://localhost:3131` (or `http://localhost`)
+- **Backend API**: `http://localhost:8484/api/v1`
+- **Swagger Documentation**: `http://localhost:8484/swagger-ui.html`
 - **Super Admin Username**: `admin`
-- **Super Admin Password**: `Admin@123456`
+- **Super Admin Password**: `Admin@123456` (or `admin123` / `admin`)

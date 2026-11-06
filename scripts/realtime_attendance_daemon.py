@@ -83,10 +83,18 @@ def play_khmer_voice():
 
     def _play():
         try:
-            if shutil.which("pw-play") and os.path.exists(AUDIO_FILE_WAV):
-                subprocess.run(["pw-play", AUDIO_FILE_WAV], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            elif shutil.which("aplay") and os.path.exists(AUDIO_FILE_WAV):
-                subprocess.run(["aplay", "-q", AUDIO_FILE_WAV], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            sound_file = os.getenv("DAEMON_AUDIO_FILE", AUDIO_FILE_WAV)
+            if sys.platform == "win32":
+                try:
+                    import winsound
+                    if os.path.exists(sound_file):
+                        winsound.PlaySound(sound_file, winsound.SND_FILENAME | winsound.SND_ASYNC)
+                except Exception:
+                    pass
+            elif shutil.which("pw-play") and os.path.exists(sound_file):
+                subprocess.run(["pw-play", sound_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            elif shutil.which("aplay") and os.path.exists(sound_file):
+                subprocess.run(["aplay", "-q", sound_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             elif shutil.which("pw-play") and os.path.exists(AUDIO_FILE_MP3):
                 subprocess.run(["pw-play", AUDIO_FILE_MP3], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception as e:

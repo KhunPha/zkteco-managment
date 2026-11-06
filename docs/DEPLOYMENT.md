@@ -48,9 +48,9 @@ To safeguard biometric devices and prevent unauthorized network snooping, place 
 | Port | Protocol | Scope | Purpose |
 |---|---|---|---|
 | **80 / 443** | HTTP / HTTPS | Public / LAN | Web UI, REST API, SSL Termination |
-| **8080** | HTTP | Device VLAN / Ingress | ZKTeco ADMS Push Endpoint (`/iclock/*`) |
+| **8484** | HTTP | Device VLAN / Ingress | Spring Boot Backend & ZKTeco ADMS Endpoint |
 | **4370** | TCP | Device VLAN | Direct socket communication with terminals |
-| **3000** | HTTP | Internal Docker | Next.js App Router server |
+| **3131** | HTTP | Internal Docker | Next.js App Router server |
 | **5432** | TCP | Internal Docker | PostgreSQL database |
 | **6379** | TCP | Internal Docker | Redis caching and rate-limiting |
 
@@ -77,7 +77,7 @@ POSTGRES_PASSWORD=UseAStrongGeneratedPasswordHere!99$
 
 # Spring Boot
 SPRING_PROFILES_ACTIVE=prod
-SERVER_PORT=8080
+SERVER_PORT=8484
 
 # Security (64-byte Hex or Base64 secret for HS512)
 JWT_SECRET=c8f8b0e7a2b9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1
@@ -248,8 +248,8 @@ Add the following line to schedule daily backups at 01:00 AM UTC:
 
 ## 6. Health Checks & Telemetry
 
-- **Application Health**: `GET http://<backend>:8080/actuator/health`
-- **Prometheus Metrics**: `GET http://<backend>:8080/actuator/prometheus`
+- **Application Health**: `GET http://<backend>:8484/actuator/health`
+- **Prometheus Metrics**: `GET http://<backend>:8484/actuator/prometheus`
 - **Default Super Admin Login**:
   - Username: `admin`
   - Password: `Admin@123456`

@@ -14,7 +14,9 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 @Slf4j
 @Component
@@ -34,7 +36,9 @@ public class ZKTecoTcpClient implements BiometricDeviceClient {
     private static final int CMD_DEVICE_INFO = 11;
     private static final int CMD_ATTLOG_RRQ = 9;
     private static final int CMD_USERTEMP_RRQ = 8;
+    private static final int CMD_AUTH = 1102;
     private static final int CMD_ACK_OK = 2000;
+    private static final int CMD_ACK_UNAUTH = 2005;
 
     private static final int USHRT_MAX = 65535;
 
@@ -286,6 +290,255 @@ public class ZKTecoTcpClient implements BiometricDeviceClient {
         }
     }
 
+    @Override
+    public boolean testVoice(String ipAddress, int port, String commKey, int voiceIndex) {
+        if (ipAddress == null || ipAddress.isBlank()) return false;
+        String host = resolveHost(ipAddress, port);
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(host, port), TIMEOUT_MS);
+            socket.setSoTimeout(TIMEOUT_MS);
+
+            Session session = connectSession(socket, commKey);
+            if (session.sessionId == 0) return false;
+
+            ByteBuffer buf = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN);
+            buf.putInt(voiceIndex);
+            byte[] resp = sendCommand(socket, session, 1017, buf.array());
+            disconnectSession(socket, session);
+            return getResponseCode(resp) == CMD_ACK_OK;
+        } catch (Exception ex) {
+            log.warn("Test voice failed for {}:{}: {}", host, port, ex.getMessage());
+            return false;
+        }
+    }
+
+    @Override
+    public boolean powerOffDevice(String ipAddress, int port, String commKey) {
+        if (ipAddress == null || ipAddress.isBlank()) return false;
+        String host = resolveHost(ipAddress, port);
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(host, port), TIMEOUT_MS);
+            socket.setSoTimeout(TIMEOUT_MS);
+
+            Session session = connectSession(socket, commKey);
+            if (session.sessionId == 0) return false;
+
+            byte[] resp = sendCommand(socket, session, 1005, new byte[0]);
+            disconnectSession(socket, session);
+            return getResponseCode(resp) == CMD_ACK_OK;
+        } catch (Exception ex) {
+            log.warn("Power off failed for {}:{}: {}", host, port, ex.getMessage());
+            return false;
+        }
+    }
+
+    @Override
+    public boolean enableDevice(String ipAddress, int port, String commKey) {
+        if (ipAddress == null || ipAddress.isBlank()) return false;
+        String host = resolveHost(ipAddress, port);
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(host, port), TIMEOUT_MS);
+            socket.setSoTimeout(TIMEOUT_MS);
+
+            Session session = connectSession(socket, commKey);
+            if (session.sessionId == 0) return false;
+
+            byte[] resp = sendCommand(socket, session, CMD_ENABLEDEVICE, new byte[0]);
+            disconnectSession(socket, session);
+            return getResponseCode(resp) == CMD_ACK_OK;
+        } catch (Exception ex) {
+            log.warn("Enable device failed for {}:{}: {}", host, port, ex.getMessage());
+            return false;
+        }
+    }
+
+    @Override
+    public boolean disableDevice(String ipAddress, int port, String commKey) {
+        if (ipAddress == null || ipAddress.isBlank()) return false;
+        String host = resolveHost(ipAddress, port);
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(host, port), TIMEOUT_MS);
+            socket.setSoTimeout(TIMEOUT_MS);
+
+            Session session = connectSession(socket, commKey);
+            if (session.sessionId == 0) return false;
+
+            byte[] resp = sendCommand(socket, session, CMD_DISABLEDEVICE, new byte[0]);
+            disconnectSession(socket, session);
+            return getResponseCode(resp) == CMD_ACK_OK;
+        } catch (Exception ex) {
+            log.warn("Disable device failed for {}:{}: {}", host, port, ex.getMessage());
+            return false;
+        }
+    }
+
+    @Override
+    public boolean unlockDoor(String ipAddress, int port, String commKey, int seconds) {
+        if (ipAddress == null || ipAddress.isBlank()) return false;
+        String host = resolveHost(ipAddress, port);
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(host, port), TIMEOUT_MS);
+            socket.setSoTimeout(TIMEOUT_MS);
+
+            Session session = connectSession(socket, commKey);
+            if (session.sessionId == 0) return false;
+
+            ByteBuffer buf = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN);
+            buf.putInt(seconds * 10);
+            byte[] resp = sendCommand(socket, session, 31, buf.array());
+            disconnectSession(socket, session);
+            return getResponseCode(resp) == CMD_ACK_OK;
+        } catch (Exception ex) {
+            log.warn("Unlock door failed for {}:{}: {}", host, port, ex.getMessage());
+            return false;
+        }
+    }
+
+    @Override
+    public boolean clearAdmin(String ipAddress, int port, String commKey) {
+        if (ipAddress == null || ipAddress.isBlank()) return false;
+        String host = resolveHost(ipAddress, port);
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(host, port), TIMEOUT_MS);
+            socket.setSoTimeout(TIMEOUT_MS);
+
+            Session session = connectSession(socket, commKey);
+            if (session.sessionId == 0) return false;
+
+            byte[] resp = sendCommand(socket, session, 20, new byte[0]);
+            disconnectSession(socket, session);
+            return getResponseCode(resp) == CMD_ACK_OK;
+        } catch (Exception ex) {
+            log.warn("Clear admin failed for {}:{}: {}", host, port, ex.getMessage());
+            return false;
+        }
+    }
+
+    @Override
+    public boolean deleteUser(String ipAddress, int port, String commKey, String pin) {
+        if (ipAddress == null || ipAddress.isBlank()) return false;
+        String host = resolveHost(ipAddress, port);
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(host, port), TIMEOUT_MS);
+            socket.setSoTimeout(TIMEOUT_MS);
+
+            Session session = connectSession(socket, commKey);
+            if (session.sessionId == 0) return false;
+
+            int pinNum = 0;
+            try {
+                pinNum = Integer.parseInt(pin.replaceAll("\\D+", ""));
+            } catch (Exception ignored) {}
+
+            ByteBuffer buf = ByteBuffer.allocate(2).order(ByteOrder.LITTLE_ENDIAN);
+            buf.putShort((short) (pinNum & 0xFFFF));
+            byte[] resp = sendCommand(socket, session, 1053, buf.array()); // CMD_DELETE_USER = 1053
+            sendCommand(socket, session, 1013, new byte[0]); // CMD_REFRESHDATA = 1013
+
+            disconnectSession(socket, session);
+            return getResponseCode(resp) == CMD_ACK_OK;
+        } catch (Exception ex) {
+            log.warn("Delete user failed for {}:{}: {}", host, port, ex.getMessage());
+            return false;
+        }
+    }
+
+    @Override
+    public boolean clearAttendanceLogs(String ipAddress, int port, String commKey) {
+        if (ipAddress == null || ipAddress.isBlank()) return false;
+        String host = resolveHost(ipAddress, port);
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(host, port), TIMEOUT_MS);
+            socket.setSoTimeout(TIMEOUT_MS);
+
+            Session session = connectSession(socket, commKey);
+            if (session.sessionId == 0) return false;
+
+            byte[] resp = sendCommand(socket, session, 44, new byte[0]); // CMD_CLEAR_ATTLOG = 44
+            sendCommand(socket, session, 1013, new byte[0]); // CMD_REFRESHDATA = 1013
+
+            disconnectSession(socket, session);
+            return getResponseCode(resp) == CMD_ACK_OK;
+        } catch (Exception ex) {
+            log.warn("Clear attendance logs failed for {}:{}: {}", host, port, ex.getMessage());
+            return false;
+        }
+    }
+
+    @Override
+    public Map<String, String> getMenuParameters(String ipAddress, int port, String commKey) {
+        Map<String, String> params = new LinkedHashMap<>();
+        if (ipAddress == null || ipAddress.isBlank()) return params;
+        String host = resolveHost(ipAddress, port);
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(host, port), TIMEOUT_MS);
+            socket.setSoTimeout(TIMEOUT_MS);
+
+            Session session = connectSession(socket, commKey);
+            if (session.sessionId == 0) return params;
+
+            String[] keys = {
+                "~DeviceName", "~SerialNumber", "~Platform", "~OS", "~ZKFPVersion",
+                "IPAddress", "NetMask", "GATEIPAddress",
+                "VoiceOn", "KeyPadBeep", "Language", "Volume",
+                "MThreshold", "VThreshold",
+                "LockFunOn", "Door1Delay", "DateFormat", "TimeFormat"
+            };
+
+            for (String k : keys) {
+                try {
+                    byte[] payload = (k + "\0").getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+                    byte[] resp = sendCommand(socket, session, 11, payload); // CMD_OPTIONS_RRQ = 11
+                    if (resp != null && resp.length > 8) {
+                        String s = new String(resp, 8, resp.length - 8, java.nio.charset.StandardCharsets.ISO_8859_1).trim().replace("\0", "");
+                        if (s.contains("=")) {
+                            String[] parts = s.split("=", 2);
+                            params.put(k, parts[1]);
+                        } else if (!s.isEmpty()) {
+                            params.put(k, s);
+                        }
+                    }
+                } catch (Exception ignored) {}
+            }
+
+            disconnectSession(socket, session);
+        } catch (Exception ex) {
+            log.warn("Get menu parameters failed for {}:{}: {}", host, port, ex.getMessage());
+        }
+        return params;
+    }
+
+    @Override
+    public boolean setMenuParameters(String ipAddress, int port, String commKey, Map<String, String> params) {
+        if (ipAddress == null || ipAddress.isBlank() || params == null || params.isEmpty()) return false;
+        String host = resolveHost(ipAddress, port);
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(host, port), TIMEOUT_MS);
+            socket.setSoTimeout(TIMEOUT_MS);
+
+            Session session = connectSession(socket, commKey);
+            if (session.sessionId == 0) return false;
+
+            boolean anySuccess = false;
+            for (Map.Entry<String, String> entry : params.entrySet()) {
+                try {
+                    String str = entry.getKey() + "=" + entry.getValue() + "\0";
+                    byte[] payload = str.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+                    byte[] resp = sendCommand(socket, session, 12, payload); // CMD_OPTIONS_WRQ = 12
+                    if (getResponseCode(resp) == CMD_ACK_OK) {
+                        anySuccess = true;
+                    }
+                } catch (Exception ignored) {}
+            }
+            sendCommand(socket, session, 1013, new byte[0]); // CMD_REFRESHDATA = 1013
+            disconnectSession(socket, session);
+            return anySuccess;
+        } catch (Exception ex) {
+            log.warn("Set menu parameters failed for {}:{}: {}", host, port, ex.getMessage());
+            return false;
+        }
+    }
+
     // Protocol Internal Helpers
 
     private static class Session {
@@ -297,18 +550,44 @@ public class ZKTecoTcpClient implements BiometricDeviceClient {
         Session session = new Session();
         byte[] payload = new byte[0];
 
-        byte[] request = createPacket(CMD_CONNECT, 0, 0, payload);
+        byte[] rawRequest = createPacket(CMD_CONNECT, 0, 0, payload);
+        byte[] tcpRequest = wrapTcpPacket(rawRequest);
         OutputStream out = socket.getOutputStream();
-        out.write(request);
+        out.write(tcpRequest);
         out.flush();
 
-        byte[] response = readResponse(socket.getInputStream());
+        byte[] rawResponse = readResponse(socket.getInputStream());
+        byte[] response = unwrapTcpResponse(rawResponse);
         if (response != null && response.length >= 8) {
             int code = getResponseCode(response);
+            ByteBuffer bb = ByteBuffer.wrap(response).order(ByteOrder.LITTLE_ENDIAN);
+            session.sessionId = bb.getShort(4) & 0xFFFF;
+            session.replyId = bb.getShort(6) & 0xFFFF;
+
             if (code == CMD_ACK_OK) {
-                ByteBuffer bb = ByteBuffer.wrap(response).order(ByteOrder.LITTLE_ENDIAN);
-                session.sessionId = bb.getShort(4) & 0xFFFF;
-                session.replyId = bb.getShort(6) & 0xFFFF;
+                log.debug("ZKTeco TCP connect successful, session={}", session.sessionId);
+            } else if (code == CMD_ACK_UNAUTH) {
+                log.debug("Device requested auth (code 2005), session={}", session.sessionId);
+                int keyInt = 0;
+                try {
+                    if (commKey != null && !commKey.isBlank()) {
+                        keyInt = Integer.parseInt(commKey.trim());
+                    }
+                } catch (Exception ignored) {}
+
+                byte[] authPayload = makeCommKey(keyInt, session.sessionId, 50);
+                session.replyId = (session.replyId + 1) & USHRT_MAX;
+                byte[] rawAuth = createPacket(CMD_AUTH, session.sessionId, session.replyId, authPayload);
+                out.write(wrapTcpPacket(rawAuth));
+                out.flush();
+
+                byte[] rawAuthResp = readResponse(socket.getInputStream());
+                byte[] authResp = unwrapTcpResponse(rawAuthResp);
+                if (authResp != null && getResponseCode(authResp) == CMD_ACK_OK) {
+                    log.info("ZKTeco TCP authentication accepted for session {}", session.sessionId);
+                } else {
+                    log.warn("ZKTeco TCP auth rejected or requires non-zero commKey (commKey='{}')", commKey);
+                }
             }
         }
         return session;
@@ -326,12 +605,71 @@ public class ZKTecoTcpClient implements BiometricDeviceClient {
     private byte[] sendCommand(Socket socket, Session session, int commandCode, byte[] payload) throws Exception {
         session.replyId = (session.replyId + 1) & USHRT_MAX;
         byte[] packet = createPacket(commandCode, session.sessionId, session.replyId, payload);
+        byte[] tcpPacket = wrapTcpPacket(packet);
 
         OutputStream out = socket.getOutputStream();
-        out.write(packet);
+        out.write(tcpPacket);
         out.flush();
 
-        return readResponse(socket.getInputStream());
+        byte[] rawResp = readResponse(socket.getInputStream());
+        return unwrapTcpResponse(rawResp);
+    }
+
+    private byte[] wrapTcpPacket(byte[] packet) {
+        ByteBuffer tcpBuf = ByteBuffer.allocate(8 + packet.length).order(ByteOrder.LITTLE_ENDIAN);
+        tcpBuf.putShort((short) 0x5050);
+        tcpBuf.putShort((short) 0x7D82);
+        tcpBuf.putInt(packet.length);
+        tcpBuf.put(packet);
+        return tcpBuf.array();
+    }
+
+    private byte[] unwrapTcpResponse(byte[] response) {
+        if (response == null || response.length < 8) return response;
+        if (response[0] == 0x50 && response[1] == 0x50 && response[2] == (byte) 0x82 && response[3] == 0x7D) {
+            ByteBuffer bb = ByteBuffer.wrap(response).order(ByteOrder.LITTLE_ENDIAN);
+            int len = bb.getInt(4);
+            int available = response.length - 8;
+            int copyLen = Math.min(len, available);
+            byte[] inner = new byte[copyLen];
+            System.arraycopy(response, 8, inner, 0, copyLen);
+            return inner;
+        }
+        return response;
+    }
+
+    private byte[] makeCommKey(int key, int sessionId, int ticks) {
+        long k = 0;
+        for (int i = 0; i < 32; i++) {
+            if ((key & (1 << i)) != 0) {
+                k = ((k << 1) | 1) & 0xFFFFFFFFL;
+            } else {
+                k = (k << 1) & 0xFFFFFFFFL;
+            }
+        }
+        k = (k + sessionId) & 0xFFFFFFFFL;
+        int b0 = (int) (k & 0xFF);
+        int b1 = (int) ((k >> 8) & 0xFF);
+        int b2 = (int) ((k >> 16) & 0xFF);
+        int b3 = (int) ((k >> 24) & 0xFF);
+
+        int c0 = b0 ^ 'Z';
+        int c1 = b1 ^ 'K';
+        int c2 = b2 ^ 'S';
+        int c3 = b3 ^ 'O';
+
+        int d0 = c2;
+        int d1 = c3;
+        int d2 = c0;
+        int d3 = c1;
+
+        int B = ticks & 0xFF;
+        return new byte[]{
+                (byte) (d0 ^ B),
+                (byte) (d1 ^ B),
+                (byte) B,
+                (byte) (d3 ^ B)
+        };
     }
 
     private byte[] createPacket(int command, int sessionId, int replyId, byte[] payload) {
@@ -379,8 +717,10 @@ public class ZKTecoTcpClient implements BiometricDeviceClient {
     }
 
     private int getResponseCode(byte[] packet) {
-        if (packet == null || packet.length < 2) return -1;
-        return ByteBuffer.wrap(packet).order(ByteOrder.LITTLE_ENDIAN).getShort(0) & 0xFFFF;
+        if (packet == null) return -1;
+        byte[] unwrapped = unwrapTcpResponse(packet);
+        if (unwrapped.length < 2) return -1;
+        return ByteBuffer.wrap(unwrapped).order(ByteOrder.LITTLE_ENDIAN).getShort(0) & 0xFFFF;
     }
 
     private String extractStringFromPayload(byte[] packet) {

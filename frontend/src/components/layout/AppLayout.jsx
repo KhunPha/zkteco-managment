@@ -11,17 +11,22 @@ export default function AppLayout({ children }) {
   const router = useRouter();
   const pathname = usePathname();
   const { isAuthenticated } = useAuthStore();
-  const { darkMode } = useThemeStore();
+  const { darkMode, initTheme } = useThemeStore();
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
+    initTheme();
     setMounted(true);
+  }, [initTheme]);
+
+  useEffect(() => {
+    if (!mounted) return;
     if (darkMode) {
       document.documentElement.classList.add("dark");
     } else {
       document.documentElement.classList.remove("dark");
     }
-  }, [darkMode]);
+  }, [darkMode, mounted]);
 
   useEffect(() => {
     if (mounted && !isAuthenticated && pathname !== "/login") {

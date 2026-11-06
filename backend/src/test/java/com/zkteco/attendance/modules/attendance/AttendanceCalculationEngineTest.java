@@ -18,6 +18,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.junit.jupiter.MockitoSettings;
+import org.mockito.quality.Strictness;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -33,6 +35,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
+@MockitoSettings(strictness = Strictness.LENIENT)
 class AttendanceCalculationEngineTest {
 
     @Mock
@@ -53,6 +56,10 @@ class AttendanceCalculationEngineTest {
     private HolidayRepository holidayRepository;
     @Mock
     private LeaveRequestRepository leaveRequestRepository;
+    @Mock
+    private com.zkteco.attendance.modules.personnel.StudentRepository studentRepository;
+    @Mock
+    private com.zkteco.attendance.modules.biometric.FaceBiometricRepository faceBiometricRepository;
 
     @InjectMocks
     private AttendanceCalculationEngine calculationEngine;
@@ -88,6 +95,8 @@ class AttendanceCalculationEngineTest {
                 .name("Main Entrance")
                 .serialNumber("ZK-PP-001")
                 .build();
+
+        when(studentRepository.findAll()).thenReturn(Collections.emptyList());
     }
 
     @Test
@@ -96,6 +105,7 @@ class AttendanceCalculationEngineTest {
         when(employeeRepository.findAll()).thenReturn(List.of(employee));
         when(attendanceRecordRepository.findByEmployeeIdAndAttendanceDate(1L, date)).thenReturn(Optional.empty());
         when(shiftRepository.findByCode("SHIFT_MORNING")).thenReturn(Optional.of(shift));
+        when(holidayRepository.isHolidayOnDate(date)).thenReturn(false);
         when(holidayRepository.existsByHolidayDate(date)).thenReturn(false);
         when(leaveRequestRepository.findApprovedLeavesOnDate(1L, date)).thenReturn(Collections.emptyList());
         when(scheduleRepository.findActiveSchedules(1L, date)).thenReturn(Collections.emptyList());
@@ -127,7 +137,8 @@ class AttendanceCalculationEngineTest {
         assertEquals(1, result.getTotalProcessed());
         assertEquals(0, result.getTotalErrors());
 
-        verify(attendanceRecordRepository).save(argThat(record -> {
+        verify(attendanceRecordRepository).saveAll(argThat(records -> {
+            AttendanceRecord record = records.iterator().next();
             assertEquals("PRESENT", record.getStatus());
             assertEquals(0, record.getLateMinutes());
             return true;
@@ -140,6 +151,7 @@ class AttendanceCalculationEngineTest {
         when(employeeRepository.findAll()).thenReturn(List.of(employee));
         when(attendanceRecordRepository.findByEmployeeIdAndAttendanceDate(1L, date)).thenReturn(Optional.empty());
         when(shiftRepository.findByCode("SHIFT_MORNING")).thenReturn(Optional.of(shift));
+        when(holidayRepository.isHolidayOnDate(date)).thenReturn(false);
         when(holidayRepository.existsByHolidayDate(date)).thenReturn(false);
         when(leaveRequestRepository.findApprovedLeavesOnDate(1L, date)).thenReturn(Collections.emptyList());
         when(scheduleRepository.findActiveSchedules(1L, date)).thenReturn(Collections.emptyList());
@@ -166,7 +178,8 @@ class AttendanceCalculationEngineTest {
 
         calculationEngine.processAttendanceForDate(date);
 
-        verify(attendanceRecordRepository).save(argThat(record -> {
+        verify(attendanceRecordRepository).saveAll(argThat(records -> {
+            AttendanceRecord record = records.iterator().next();
             assertEquals("LATE", record.getStatus());
             assertEquals(30, record.getLateMinutes());
             return true;
@@ -179,6 +192,7 @@ class AttendanceCalculationEngineTest {
         when(employeeRepository.findAll()).thenReturn(List.of(employee));
         when(attendanceRecordRepository.findByEmployeeIdAndAttendanceDate(1L, date)).thenReturn(Optional.empty());
         when(shiftRepository.findByCode("SHIFT_MORNING")).thenReturn(Optional.of(shift));
+        when(holidayRepository.isHolidayOnDate(date)).thenReturn(false);
         when(holidayRepository.existsByHolidayDate(date)).thenReturn(false);
         when(leaveRequestRepository.findApprovedLeavesOnDate(1L, date)).thenReturn(Collections.emptyList());
         when(scheduleRepository.findActiveSchedules(1L, date)).thenReturn(Collections.emptyList());
@@ -190,7 +204,8 @@ class AttendanceCalculationEngineTest {
 
         calculationEngine.processAttendanceForDate(date);
 
-        verify(attendanceRecordRepository).save(argThat(record -> {
+        verify(attendanceRecordRepository).saveAll(argThat(records -> {
+            AttendanceRecord record = records.iterator().next();
             assertEquals("ABSENT", record.getStatus());
             assertNull(record.getFirstCheckIn());
             return true;

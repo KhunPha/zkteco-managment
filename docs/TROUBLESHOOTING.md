@@ -61,7 +61,7 @@ This guide outlines diagnostic procedures, error codes, and resolution steps for
    - On the terminal physical menu:
      - Navigate to `Comm. -> Cloud Server Settings` (or `ADMS Settings` on older firmware).
      - **Server Address**: Must point to the backend IP or domain (e.g., `192.168.1.100` or `attendance.domain.com`).
-     - **Server Port**: `8080` (or `80` / `443` if behind Nginx).
+     - **Server Port**: `8484` (or `80` / `443` if behind Nginx).
      - **Enable Domain Name**: Turn `ON` if using a domain; `OFF` if using direct IP.
      - **Proxy Server**: Ensure proxy is disabled unless mandatory on the local network.
 2. **Nginx Reverse Proxy Buffering**:

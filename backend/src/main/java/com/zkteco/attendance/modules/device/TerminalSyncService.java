@@ -22,6 +22,7 @@ public class TerminalSyncService {
 
     private final DeviceRepository deviceRepository;
     private final DeviceUserRepository deviceUserRepository;
+    private final com.zkteco.attendance.modules.zkteco.ZKTecoTcpClient tcpClient;
 
     /**
      * Synchronize employee to all active biometric terminals.
@@ -156,54 +157,39 @@ public class TerminalSyncService {
 
     private boolean executeSyncScript(String action, String pin, String name, String card, String privilege, String password, String ip, Integer port) {
         try {
-            String pythonBin = "/home/sophaederson/zkteco-in01a/venv/bin/python3";
-            if (!new File(pythonBin).exists()) {
-                pythonBin = "python3";
-            }
-
-            File scriptFile = new File("scripts/sync_user_to_device.py");
-            if (!scriptFile.exists()) {
-                scriptFile = new File("/home/sophaederson/Desktop/Programming/Project/zkteco-managment/scripts/sync_user_to_device.py");
-            }
-
-            List<String> cmd = new ArrayList<>(List.of(
-                    pythonBin,
-                    scriptFile.getAbsolutePath(),
-                    "--action", action,
-                    "--pin", pin != null ? pin.trim() : "",
-                    "--name", name != null ? name.trim() : "",
-                    "--card", card != null ? card.trim() : "0",
-                    "--privilege", privilege != null ? privilege.trim() : "NORMAL_USER",
-                    "--password", password != null ? password.trim() : ""
-            ));
-
-            if (ip != null && !ip.isBlank()) {
-                cmd.add("--ip");
-                cmd.add(ip.trim());
-                if (port != null) {
-                    cmd.add("--port");
-                    cmd.add(String.valueOf(port));
+            if ("delete".equalsIgnoreCase(action)) {
+                if (ip != null && !ip.isBlank()) {
+                    return tcpClient.deleteUser(ip, port != null ? port : 4370, null, pin);
                 }
-            }
-
-            log.info("Executing terminal sync command: {}", String.join(" ", cmd));
-            ProcessBuilder pb = new ProcessBuilder(cmd);
-            pb.redirectErrorStream(true);
-            Process process = pb.start();
-
-            StringBuilder output = new StringBuilder();
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    output.append(line).append("\n");
+                List<AttendanceDevice> activeDevices = deviceRepository.findAll().stream()
+                        .filter(AttendanceDevice::isActive)
+                        .toList();
+                boolean allOk = true;
+                for (AttendanceDevice d : activeDevices) {
+                    if (d.getIpAddress() != null && !d.getIpAddress().isBlank()) {
+                        boolean ok = tcpClient.deleteUser(d.getIpAddress(), d.getPort(), d.getCommKey(), pin);
+                        if (!ok) allOk = false;
+                    }
                 }
+                return allOk;
+            } else {
+                if (ip != null && !ip.isBlank()) {
+                    return tcpClient.setUserInfo(ip, port != null ? port : 4370, null, pin, name, password, privilege, card);
+                }
+                List<AttendanceDevice> activeDevices = deviceRepository.findAll().stream()
+                        .filter(AttendanceDevice::isActive)
+                        .toList();
+                boolean allOk = true;
+                for (AttendanceDevice d : activeDevices) {
+                    if (d.getIpAddress() != null && !d.getIpAddress().isBlank()) {
+                        boolean ok = tcpClient.setUserInfo(d.getIpAddress(), d.getPort(), d.getCommKey(), pin, name, password, privilege, card);
+                        if (!ok) allOk = false;
+                    }
+                }
+                return allOk;
             }
-
-            int exitCode = process.waitFor();
-            log.info("Terminal sync execution result (code {}): {}", exitCode, output.toString().trim());
-            return exitCode == 0;
         } catch (Exception ex) {
-            log.error("Error invoking sync_user_to_device.py: {}", ex.getMessage());
+            log.error("Native terminal sync operation failed for PIN {}: {}", pin, ex.getMessage());
             return false;
         }
     }

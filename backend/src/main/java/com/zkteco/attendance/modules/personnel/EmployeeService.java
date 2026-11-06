@@ -94,7 +94,11 @@ public class EmployeeService {
         if (empCode == null || empCode.trim().isEmpty()) {
             empCode = personnelCodeGeneratorService.generateNextUniqueCode();
         } else {
-            empCode = empCode.trim().toUpperCase();
+            // Enforce purely numeric codes (no letters or special characters)
+            empCode = empCode.trim().replaceAll("[^0-9]", "");
+            if (empCode.isEmpty()) {
+                empCode = personnelCodeGeneratorService.generateNextUniqueCode();
+            }
             if (employeeRepository.existsByEmployeeCodeAndDeletedAtIsNull(empCode)) {
                 throw new AppException(ErrorCode.DUPLICATE_RESOURCE, "Employee code already exists: " + empCode);
             }
@@ -148,8 +152,8 @@ public class EmployeeService {
                 .orElseThrow(() -> new ResourceNotFoundException("Employee", "id", id));
 
         if (request.getEmployeeCode() != null && !request.getEmployeeCode().trim().isEmpty()) {
-            String newCode = request.getEmployeeCode().trim().toUpperCase();
-            if (!newCode.equalsIgnoreCase(emp.getEmployeeCode())) {
+            String newCode = request.getEmployeeCode().trim().replaceAll("[^0-9]", "");
+            if (!newCode.isEmpty() && !newCode.equalsIgnoreCase(emp.getEmployeeCode())) {
                 if (employeeRepository.existsByEmployeeCodeAndDeletedAtIsNull(newCode)) {
                     throw new AppException(ErrorCode.DUPLICATE_RESOURCE, "Employee code already exists: " + newCode);
                 }

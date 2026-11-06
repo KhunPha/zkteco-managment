@@ -1,17 +1,30 @@
 import axios from "axios";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8484";
+export const getApiBaseUrl = () => {
+  if (typeof window !== "undefined") {
+    // If accessed through port 80 (Nginx) or standard reverse proxy, use relative URL
+    if (window.location.port === "80" || window.location.port === "") {
+      return "";
+    }
+    // If accessed directly on port 3131, route to backend port 8484 on the same host
+    return `${window.location.protocol}//${window.location.hostname}:8484`;
+  }
+  return process.env.NEXT_PUBLIC_API_URL || "http://localhost:8484";
+};
 
 const api = axios.create({
-  baseURL: API_BASE_URL,
+  baseURL: typeof window !== "undefined" ? getApiBaseUrl() : (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8484"),
   headers: {
     "Content-Type": "application/json",
   },
 });
 
-// Request interceptor to attach JWT Access Token
+// Request interceptor to attach dynamic baseURL and JWT Access Token
 api.interceptors.request.use(
   (config) => {
+    if (typeof window !== "undefined" && (!config.baseURL || config.baseURL === "")) {
+      config.baseURL = getApiBaseUrl();
+    }
     if (typeof window !== "undefined") {
       const token = localStorage.getItem("access_token");
       if (token) {
@@ -38,7 +51,7 @@ api.interceptors.response.use(
         const refreshToken = localStorage.getItem("refresh_token");
         if (refreshToken) {
           try {
-            const refreshRes = await axios.post(`${API_BASE_URL}/api/v1/auth/refresh`, {
+            const refreshRes = await axios.post(`${getApiBaseUrl()}/api/v1/auth/refresh`, {
               refreshToken: refreshToken,
             });
 

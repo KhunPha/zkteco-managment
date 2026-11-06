@@ -4,8 +4,8 @@
 
 The platform exposes a standard RESTful API adhering to RFC 7807 problem details and predictable JSON response structures.
 
-- **Base URL**: `http://<server-ip>:8080/api/v1` (or via reverse proxy `http://<domain>/api/v1`)
-- **ADMS Server Base URL**: `http://<server-ip>:8080/iclock` (for ZKTeco hardware devices)
+- **Base URL**: `http://<server-ip>:8484/api/v1` (or via reverse proxy `http://<domain>/api/v1`)
+- **ADMS Server Base URL**: `http://<server-ip>:8484/iclock` (or via reverse proxy `http://<server-ip>/iclock`)
 - **Timezone**: All timestamps in requests and responses are ISO 8601 UTC (`YYYY-MM-DDTHH:mm:ssZ`). Calculated local representations adhere to `Asia/Phnom_Penh` (UTC+07:00).
 - **Authentication**: Bearer JWT tokens sent via standard HTTP header `Authorization: Bearer <access_token>`.
 

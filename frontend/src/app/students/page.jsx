@@ -21,10 +21,12 @@ import {
   Filter,
   CheckSquare,
   Square,
+  Camera,
 } from "lucide-react";
 import api from "@/lib/api";
 import ImageUploadDropzone from "@/components/common/ImageUploadDropzone";
 import Portal from "@/components/common/Portal";
+import WebcamFaceEnrollModal from "@/components/biometrics/WebcamFaceEnrollModal";
 
 const ALL_GRADES = [
   "Kindergarten",
@@ -80,6 +82,7 @@ export default function StudentsPage() {
   const [pageSize, setPageSize] = useState(25);
   const [showModal, setShowModal] = useState(false);
   const [editingStudentId, setEditingStudentId] = useState(null);
+  const [faceEnrollPerson, setFaceEnrollPerson] = useState(null);
   const [showPromoteModal, setShowPromoteModal] = useState(false);
   const [selectedStudentIds, setSelectedStudentIds] = useState([]);
 
@@ -591,6 +594,24 @@ export default function StudentsPage() {
                     </td>
                     <td className="py-3 px-4 text-right">
                       <div className="flex items-center justify-end gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setFaceEnrollPerson({
+                              id: s.id,
+                              code: s.studentCode,
+                              name: s.englishName,
+                              khmerName: s.khmerName,
+                              type: "STUDENT",
+                              departmentOrClass: (s.className || "") + (s.grade ? ` (${s.grade})` : ""),
+                              photoUrl: s.profileImageUrl,
+                            })
+                          }
+                          className="p-1.5 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 rounded-lg transition-colors cursor-pointer"
+                          title="ចុះឈ្មោះ Face ID តាម Webcam (Enroll Face ID)"
+                        >
+                          <Camera size={15} />
+                        </button>
                         <button
                           onClick={() => openEditModal(s)}
                           className="p-1.5 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 rounded-lg transition-colors cursor-pointer"
@@ -1294,6 +1315,17 @@ export default function StudentsPage() {
         </div>
         </Portal>
       )}
+
+      {/* Webcam Face ID Enrollment Modal */}
+      <WebcamFaceEnrollModal
+        isOpen={Boolean(faceEnrollPerson)}
+        person={faceEnrollPerson}
+        onClose={() => setFaceEnrollPerson(null)}
+        onSuccess={() => {
+          queryClient.invalidateQueries(["students"]);
+          refetch();
+        }}
+      />
     </div>
   );
 }
