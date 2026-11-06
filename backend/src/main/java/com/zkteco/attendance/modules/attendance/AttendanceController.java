@@ -3,6 +3,7 @@ package com.zkteco.attendance.modules.attendance;
 import com.zkteco.attendance.common.ApiResponse;
 import com.zkteco.attendance.common.PageResponse;
 import com.zkteco.attendance.modules.attendance.dto.AttendanceRecordDto;
+import com.zkteco.attendance.modules.attendance.dto.LiveScanEventDto;
 import com.zkteco.attendance.modules.attendance.dto.ManualAttendanceRequest;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -17,6 +18,7 @@ import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDate;
+import java.util.List;
 
 @RestController
 @RequestMapping("/api/v1/attendance")
@@ -37,18 +39,29 @@ public class AttendanceController {
             @RequestParam(required = false) Long branchId,
             @RequestParam(required = false) String status,
             @RequestParam(required = false) Long employeeId,
-            @PageableDefault(size = 20, sort = "attendanceDate") Pageable pageable) {
+            @RequestParam(required = false) String search,
+            @RequestParam(required = false) String personnelType,
+            @RequestParam(required = false) String orderBy,
+            @PageableDefault(size = 20) Pageable pageable) {
 
         LocalDate targetDate = (date == null && startDate == null) ? LocalDate.now() : date;
         return ResponseEntity.ok(ApiResponse.ok(
-                attendanceService.getAttendanceRecords(targetDate, startDate, endDate, departmentId, branchId, status, employeeId, pageable)
+                attendanceService.getAttendanceRecords(targetDate, startDate, endDate, departmentId, branchId, status, employeeId, search, personnelType, orderBy, pageable)
         ));
+    }
+
+    @GetMapping("/live-scans")
+    @PreAuthorize("hasAuthority('attendance.read') or hasRole('SUPER_ADMIN') or hasRole('ADMIN') or hasRole('HR_MANAGER')")
+    @Operation(summary = "Get real-time live biometric scan events with resolved student/teacher/employee metadata")
+    public ResponseEntity<ApiResponse<List<LiveScanEventDto>>> getLiveScans(
+            @RequestParam(defaultValue = "15") int limit) {
+        return ResponseEntity.ok(ApiResponse.ok(attendanceService.getLiveScans(limit)));
     }
 
     @GetMapping("/raw-logs")
     @PreAuthorize("hasAuthority('attendance.read') or hasRole('SUPER_ADMIN') or hasRole('ADMIN')")
     @Operation(summary = "Get raw un-tampered terminal event logs")
-    public ResponseEntity<ApiResponse<PageResponse<AttendanceRawLog>>> getRawLogs(
+    public ResponseEntity<ApiResponse<PageResponse<com.zkteco.attendance.modules.attendance.dto.AttendanceRawLogDto>>> getRawLogs(
             @PageableDefault(size = 25) Pageable pageable) {
         return ResponseEntity.ok(ApiResponse.ok(attendanceService.getRawLogs(pageable)));
     }

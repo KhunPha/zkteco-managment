@@ -47,6 +47,9 @@ public class Student extends BaseEntity {
     @Column(nullable = false, length = 50)
     private String status = "ACTIVE"; // ACTIVE, GRADUATED, SUSPENDED, WITHDRAWN
 
+    @Column(name = "profile_image_url", columnDefinition = "TEXT")
+    private String profileImageUrl;
+
     @Column(name = "deleted_at")
     private Instant deletedAt;
 }

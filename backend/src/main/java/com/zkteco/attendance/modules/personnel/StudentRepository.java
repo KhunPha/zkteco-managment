@@ -9,6 +9,7 @@ import java.util.Optional;
 @Repository
 public interface StudentRepository extends JpaRepository<Student, Long>, JpaSpecificationExecutor<Student> {
     Optional<Student> findByStudentCodeAndDeletedAtIsNull(String studentCode);
+    Optional<Student> findFirstByStudentCodeOrderByIdDesc(String studentCode);
     boolean existsByStudentCodeAndDeletedAtIsNull(String studentCode);
     long countByStatusAndDeletedAtIsNull(String status);
 }

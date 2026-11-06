@@ -8,6 +8,8 @@ import com.zkteco.attendance.modules.leave.LeaveRequest;
 import com.zkteco.attendance.modules.leave.LeaveRequestRepository;
 import com.zkteco.attendance.modules.personnel.Employee;
 import com.zkteco.attendance.modules.personnel.EmployeeRepository;
+import com.zkteco.attendance.modules.personnel.Student;
+import com.zkteco.attendance.modules.personnel.StudentRepository;
 import com.zkteco.attendance.modules.shift.EmployeeSchedule;
 import com.zkteco.attendance.modules.shift.EmployeeScheduleRepository;
 import com.zkteco.attendance.modules.shift.Shift;
@@ -35,6 +37,7 @@ public class AttendanceCalculationEngine {
     private final AttendanceProcessingLogRepository processingLogRepository;
     private final HolidayRepository holidayRepository;
     private final LeaveRequestRepository leaveRequestRepository;
+    private final StudentRepository studentRepository;
 
     @Transactional
     public AttendanceProcessingLog processAttendanceForDate(LocalDate date) {
@@ -59,6 +62,29 @@ public class AttendanceCalculationEngine {
 
         boolean isPublicHoliday = holidayRepository.existsByHolidayDate(date);
 
+        // Pre-load all device user PINs mapped by employee ID and student ID (High performance batching)
+        Map<Long, Set<String>> pinsByEmpId = new HashMap<>();
+        Map<Long, Set<String>> pinsByStudentId = new HashMap<>();
+        for (AttendanceDeviceUser u : deviceUserRepository.findAll()) {
+            if (u.getEmployee() != null && u.getDevicePin() != null) {
+                pinsByEmpId.computeIfAbsent(u.getEmployee().getId(), k -> new HashSet<>()).add(u.getDevicePin());
+            }
+            if (u.getStudent() != null && u.getDevicePin() != null) {
+                pinsByStudentId.computeIfAbsent(u.getStudent().getId(), k -> new HashSet<>()).add(u.getDevicePin());
+            }
+        }
+
+        // Pre-load existing records for the target date
+        List<AttendanceRecord> existingRecords = attendanceRecordRepository.findByAttendanceDate(date);
+        Map<Long, AttendanceRecord> existingByEmpId = new HashMap<>();
+        Map<Long, AttendanceRecord> existingByStudentId = new HashMap<>();
+        for (AttendanceRecord r : existingRecords) {
+            if (r.getEmployee() != null) existingByEmpId.put(r.getEmployee().getId(), r);
+            if (r.getStudent() != null) existingByStudentId.put(r.getStudent().getId(), r);
+        }
+
+        List<AttendanceRecord> recordsToSave = new ArrayList<>();
+
         // 3. Process each active employee
         List<Employee> employees = employeeRepository.findAll().stream()
                 .filter(e -> e.getDeletedAt() == null && "ACTIVE".equalsIgnoreCase(e.getEmploymentStatus()))
@@ -67,7 +93,7 @@ public class AttendanceCalculationEngine {
         for (Employee emp : employees) {
             try {
                 // Check if an existing manual adjustment is present
-                Optional<AttendanceRecord> existingOpt = attendanceRecordRepository.findByEmployeeIdAndAttendanceDate(emp.getId(), date);
+                Optional<AttendanceRecord> existingOpt = Optional.ofNullable(existingByEmpId.get(emp.getId()));
                 if (existingOpt.isPresent() && existingOpt.get().isManualAdjusted()) {
                     continue; // Preserve approved manual corrections!
                 }
@@ -92,10 +118,10 @@ public class AttendanceCalculationEngine {
                 boolean isOnLeave = !approvedLeaves.isEmpty();
 
                 // Find all device PINs assigned to this employee
-                List<AttendanceDeviceUser> devUsers = deviceUserRepository.findByEmployeeId(emp.getId());
-                Set<String> pins = devUsers.stream().map(AttendanceDeviceUser::getDevicePin).collect(Collectors.toSet());
-                // Also check if employeeCode matches PIN directly
-                pins.add(emp.getEmployeeCode());
+                Set<String> pins = new HashSet<>(pinsByEmpId.getOrDefault(emp.getId(), Collections.emptySet()));
+                if (emp.getEmployeeCode() != null) {
+                    pins.add(emp.getEmployeeCode());
+                }
 
                 // Collect punches for this employee
                 List<AttendanceRawLog> empPunches = new ArrayList<>();
@@ -130,25 +156,27 @@ public class AttendanceCalculationEngine {
                         record.setRemarks("No punch logs recorded on scheduled workday");
                     }
                     record.setFirstCheckIn(null);
+                    record.setShift1CheckOut(null);
+                    record.setShift2CheckIn(null);
                     record.setLastCheckOut(null);
                     record.setTotalWorkMinutes(0);
                     record.setLateMinutes(0);
                     record.setEarlyLeaveMinutes(0);
                     record.setOvertimeMinutes(0);
                 } else {
-                    // Employee has punches!
-                    Instant firstCheckIn = empPunches.get(0).getPunchTime();
-                    Instant lastCheckOut = empPunches.get(empPunches.size() - 1).getPunchTime();
+                    // Employee has punches! Resolve Shift 1 and Shift 2 windows
+                    TwoShiftPunches tsp = resolveTwoShiftPunches(empPunches, shift);
+
+                    Instant firstCheckIn = tsp.s1In != null ? tsp.s1In : tsp.s2In;
+                    Instant lastCheckOut = tsp.s2Out != null ? tsp.s2Out : (tsp.s1Out != null ? tsp.s1Out : null);
 
                     record.setFirstCheckIn(firstCheckIn);
-                    record.setInDevice(empPunches.get(0).getDevice());
+                    record.setShift1CheckOut(tsp.s1Out);
+                    record.setShift2CheckIn(tsp.s2In);
+                    record.setLastCheckOut(lastCheckOut != null && !lastCheckOut.equals(firstCheckIn) ? lastCheckOut : null);
 
-                    if (empPunches.size() > 1 && !firstCheckIn.equals(lastCheckOut)) {
-                        record.setLastCheckOut(lastCheckOut);
-                        record.setOutDevice(empPunches.get(empPunches.size() - 1).getDevice());
-                    } else {
-                        record.setLastCheckOut(null);
-                    }
+                    record.setInDevice(tsp.inDevice);
+                    record.setOutDevice(tsp.outDevice);
 
                     // Calculation based on shift parameters
                     int lateMinutes = 0;
@@ -167,7 +195,12 @@ public class AttendanceCalculationEngine {
                             lateMinutes = (int) Duration.between(shiftStart, inLocalTime).toMinutes();
                         }
 
-                        // Early Departure & Overtime (when check-out exists)
+                        // Break duration
+                        if (shift.getBreakStart() != null && shift.getBreakEnd() != null) {
+                            breakMinutes = (int) Duration.between(shift.getBreakStart(), shift.getBreakEnd()).toMinutes();
+                        }
+
+                        // Early Departure & Overtime (when final check-out exists)
                         if (record.getLastCheckOut() != null) {
                             LocalTime outLocalTime = TimeUtils.toPhnomPenhLocalTime(record.getLastCheckOut());
                             LocalTime shiftEnd = shift.getEndTime();
@@ -178,14 +211,21 @@ public class AttendanceCalculationEngine {
                             } else if (outLocalTime.isAfter(shiftEnd)) {
                                 overtimeMinutes = (int) Duration.between(shiftEnd, outLocalTime).toMinutes();
                             }
+                        }
 
-                            // Break deduction
-                            if (shift.getBreakStart() != null && shift.getBreakEnd() != null) {
-                                breakMinutes = (int) Duration.between(shift.getBreakStart(), shift.getBreakEnd()).toMinutes();
-                            }
-
+                        // Accurate total work time across 2 shifts
+                        if (tsp.s1In != null && tsp.s1Out != null && tsp.s2In != null && tsp.s2Out != null) {
+                            // Staff punched in and out for both Shift 1 and Shift 2
+                            long s1 = Duration.between(tsp.s1In, tsp.s1Out).toMinutes();
+                            long s2 = Duration.between(tsp.s2In, tsp.s2Out).toMinutes();
+                            totalWorkMinutes = (int) (Math.max(0, s1) + Math.max(0, s2));
+                        } else if (firstCheckIn != null && record.getLastCheckOut() != null) {
                             long rawDuration = Duration.between(firstCheckIn, record.getLastCheckOut()).toMinutes();
                             totalWorkMinutes = (int) Math.max(0, rawDuration - breakMinutes);
+                        } else if (tsp.s1In != null && tsp.s1Out != null) {
+                            totalWorkMinutes = (int) Math.max(0, Duration.between(tsp.s1In, tsp.s1Out).toMinutes());
+                        } else if (tsp.s2In != null && tsp.s2Out != null) {
+                            totalWorkMinutes = (int) Math.max(0, Duration.between(tsp.s2In, tsp.s2Out).toMinutes());
                         }
                     }
 
@@ -205,7 +245,7 @@ public class AttendanceCalculationEngine {
                     }
                 }
 
-                attendanceRecordRepository.save(record);
+                recordsToSave.add(record);
                 processedCount++;
 
             } catch (Exception ex) {
@@ -213,6 +253,107 @@ public class AttendanceCalculationEngine {
                 errorDetails.append(emp.getEmployeeCode()).append(": ").append(ex.getMessage()).append("; ");
                 log.error("Error calculating attendance for employee {}: {}", emp.getEmployeeCode(), ex.getMessage());
             }
+        }
+
+        // 4. Process each active student (Grade / Classroom attendance)
+        List<Student> students = studentRepository.findAll().stream()
+                .filter(s -> s.getDeletedAt() == null && "ACTIVE".equalsIgnoreCase(s.getStatus()))
+                .toList();
+
+        for (Student st : students) {
+            try {
+                Optional<AttendanceRecord> existingOpt = Optional.ofNullable(existingByStudentId.get(st.getId()));
+                if (existingOpt.isPresent() && existingOpt.get().isManualAdjusted()) {
+                    continue; // Preserve approved manual corrections
+                }
+
+                // Collect device PINs linked to this student
+                Set<String> pins = new HashSet<>(pinsByStudentId.getOrDefault(st.getId(), Collections.emptySet()));
+                if (st.getStudentCode() != null) {
+                    pins.add(st.getStudentCode());
+                }
+
+                List<AttendanceRawLog> stPunches = new ArrayList<>();
+                for (String pin : pins) {
+                    List<AttendanceRawLog> pinLogs = logsByPin.get(pin);
+                    if (pinLogs != null) {
+                        stPunches.addAll(pinLogs);
+                    }
+                }
+                stPunches.sort(Comparator.comparing(AttendanceRawLog::getPunchTime));
+
+                AttendanceRecord record = existingOpt.orElseGet(() -> AttendanceRecord.builder()
+                        .student(st)
+                        .attendanceDate(date)
+                        .build());
+
+                record.setShift(defaultShift);
+
+                if (stPunches.isEmpty()) {
+                    DayOfWeek dow = date.getDayOfWeek();
+                    boolean isSchoolDay = (dow != DayOfWeek.SATURDAY && dow != DayOfWeek.SUNDAY);
+                    if (isPublicHoliday) {
+                        record.setStatus("HOLIDAY");
+                        record.setRemarks("Official Holiday");
+                    } else if (!isSchoolDay) {
+                        record.setStatus("REST_DAY");
+                        record.setRemarks("Weekend");
+                    } else {
+                        record.setStatus("ABSENT");
+                        record.setRemarks("Student absent - no punch recorded");
+                    }
+                    record.setFirstCheckIn(null);
+                    record.setShift1CheckOut(null);
+                    record.setShift2CheckIn(null);
+                    record.setLastCheckOut(null);
+                    record.setTotalWorkMinutes(0);
+                    record.setLateMinutes(0);
+                    record.setEarlyLeaveMinutes(0);
+                    record.setOvertimeMinutes(0);
+                } else {
+                    TwoShiftPunches tsp = resolveTwoShiftPunches(stPunches, defaultShift);
+                    Instant firstCheckIn = tsp.s1In != null ? tsp.s1In : tsp.s2In;
+                    Instant lastCheckOut = tsp.s2Out != null ? tsp.s2Out : (tsp.s1Out != null ? tsp.s1Out : null);
+
+                    record.setFirstCheckIn(firstCheckIn);
+                    record.setShift1CheckOut(tsp.s1Out);
+                    record.setShift2CheckIn(tsp.s2In);
+                    record.setLastCheckOut(lastCheckOut != null && !lastCheckOut.equals(firstCheckIn) ? lastCheckOut : null);
+
+                    record.setInDevice(tsp.inDevice);
+                    record.setOutDevice(tsp.outDevice);
+
+                    int lateMinutes = 0;
+                    if (defaultShift != null) {
+                        LocalTime inLocalTime = TimeUtils.toPhnomPenhLocalTime(firstCheckIn);
+                        LocalTime shiftStart = defaultShift.getStartTime();
+                        int graceLate = defaultShift.getGraceLateMinutes();
+                        if (inLocalTime.isAfter(shiftStart.plusMinutes(graceLate))) {
+                            lateMinutes = (int) Duration.between(shiftStart, inLocalTime).toMinutes();
+                        }
+                    }
+
+                    record.setLateMinutes(lateMinutes);
+                    record.setStatus(lateMinutes > 0 ? "LATE" : "PRESENT");
+                    record.setTotalWorkMinutes(record.getLastCheckOut() != null
+                            ? (int) Duration.between(firstCheckIn, record.getLastCheckOut()).toMinutes()
+                            : 0);
+                    record.setRemarks("Student verified attendance");
+                }
+
+                recordsToSave.add(record);
+                processedCount++;
+
+            } catch (Exception ex) {
+                errorCount++;
+                errorDetails.append(st.getStudentCode()).append(": ").append(ex.getMessage()).append("; ");
+                log.error("Error calculating attendance for student {}: {}", st.getStudentCode(), ex.getMessage());
+            }
+        }
+
+        // Save all records in one fast batch
+        if (!recordsToSave.isEmpty()) {
+            attendanceRecordRepository.saveAll(recordsToSave);
         }
 
         // Mark raw logs as processed
@@ -233,6 +374,89 @@ public class AttendanceCalculationEngine {
                 .build();
 
         return processingLogRepository.save(procLog);
+    }
+
+    private static class TwoShiftPunches {
+        Instant s1In;
+        Instant s1Out;
+        Instant s2In;
+        Instant s2Out;
+        com.zkteco.attendance.modules.device.AttendanceDevice inDevice;
+        com.zkteco.attendance.modules.device.AttendanceDevice outDevice;
+    }
+
+    /**
+     * Resolves up to 4 punches per day for standard 2-shift operations:
+     * - Shift 1 In: Morning First Check-In
+     * - Shift 1 Out: Midday Lunch Break Check-Out
+     * - Shift 2 In: Midday Lunch Resume Check-In
+     * - Shift 2 Out: Evening Final Check-Out
+     */
+    private TwoShiftPunches resolveTwoShiftPunches(List<AttendanceRawLog> punches, Shift shift) {
+        TwoShiftPunches res = new TwoShiftPunches();
+        if (punches == null || punches.isEmpty()) {
+            return res;
+        }
+
+        LocalTime breakStart = (shift != null && shift.getBreakStart() != null)
+                ? shift.getBreakStart() : LocalTime.of(12, 0);
+        LocalTime breakEnd = (shift != null && shift.getBreakEnd() != null)
+                ? shift.getBreakEnd() : LocalTime.of(13, 0);
+        LocalTime midBreak = breakStart.plusMinutes(Duration.between(breakStart, breakEnd).toMinutes() / 2);
+
+        // Group punches into morning (< midBreak) and afternoon (>= midBreak)
+        List<AttendanceRawLog> morningPunches = new ArrayList<>();
+        List<AttendanceRawLog> afternoonPunches = new ArrayList<>();
+
+        for (AttendanceRawLog p : punches) {
+            LocalTime lt = TimeUtils.toPhnomPenhLocalTime(p.getPunchTime());
+            String state = p.getPunchState() != null ? p.getPunchState().toUpperCase() : "";
+
+            if ("BREAK_OUT".equals(state)) {
+                morningPunches.add(p);
+            } else if ("BREAK_IN".equals(state)) {
+                afternoonPunches.add(p);
+            } else if (lt.isBefore(midBreak)) {
+                morningPunches.add(p);
+            } else {
+                afternoonPunches.add(p);
+            }
+        }
+
+        // 1. Shift 1 (Morning Window)
+        if (!morningPunches.isEmpty()) {
+            res.s1In = morningPunches.get(0).getPunchTime();
+            res.inDevice = morningPunches.get(0).getDevice();
+            if (morningPunches.size() > 1) {
+                res.s1Out = morningPunches.get(morningPunches.size() - 1).getPunchTime();
+            }
+        }
+
+        // 2. Shift 2 (Afternoon Window)
+        if (!afternoonPunches.isEmpty()) {
+            if (afternoonPunches.size() == 1) {
+                if (res.s1In != null) {
+                    res.s2Out = afternoonPunches.get(0).getPunchTime();
+                    res.outDevice = afternoonPunches.get(0).getDevice();
+                } else {
+                    res.s2In = afternoonPunches.get(0).getPunchTime();
+                    res.inDevice = afternoonPunches.get(0).getDevice();
+                }
+            } else {
+                res.s2In = afternoonPunches.get(0).getPunchTime();
+                res.s2Out = afternoonPunches.get(afternoonPunches.size() - 1).getPunchTime();
+                res.outDevice = afternoonPunches.get(afternoonPunches.size() - 1).getDevice();
+            }
+        }
+
+        if (res.inDevice == null && !punches.isEmpty()) {
+            res.inDevice = punches.get(0).getDevice();
+        }
+        if (res.outDevice == null && punches.size() > 1) {
+            res.outDevice = punches.get(punches.size() - 1).getDevice();
+        }
+
+        return res;
     }
 }
 

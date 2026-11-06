@@ -17,6 +17,8 @@ import {
 } from "lucide-react";
 import api from "@/lib/api";
 import { formatDate } from "@/lib/utils";
+import Portal from "@/components/common/Portal";
+import ImageUploadDropzone from "@/components/common/ImageUploadDropzone";
 
 export default function EmployeesPage() {
   const queryClient = useQueryClient();
@@ -39,6 +41,7 @@ export default function EmployeesPage() {
     employmentType: "FULL_TIME",
     employmentStartDate: new Date().toISOString().split("T")[0],
     employmentStatus: "ACTIVE",
+    profileImageUrl: "",
   };
 
   const [formData, setFormData] = useState(initialForm);
@@ -64,6 +67,7 @@ export default function EmployeesPage() {
       employmentType: emp.employmentType || "FULL_TIME",
       employmentStartDate: emp.employmentStartDate ? emp.employmentStartDate.split("T")[0] : new Date().toISOString().split("T")[0],
       employmentStatus: emp.employmentStatus || "ACTIVE",
+      profileImageUrl: emp.profileImageUrl || "",
     });
     setShowModal(true);
   };
@@ -92,6 +96,22 @@ export default function EmployeesPage() {
     },
   });
 
+  const { data: allEmployeesCountData } = useQuery({
+    queryKey: ["all-employees-count"],
+    queryFn: async () => {
+      const res = await api.get("/api/v1/employees?size=1");
+      return res.data?.data?.totalElements || 0;
+    },
+  });
+
+  const { data: activeEmployeesCountData } = useQuery({
+    queryKey: ["active-employees-count"],
+    queryFn: async () => {
+      const res = await api.get("/api/v1/employees?status=ACTIVE&size=1");
+      return res.data?.data?.totalElements || 0;
+    },
+  });
+
   const { data: employeesData, isLoading, refetch } = useQuery({
     queryKey: ["employees", search, departmentId, status],
     queryFn: async () => {
@@ -102,6 +122,9 @@ export default function EmployeesPage() {
       return res.data?.data;
     },
   });
+
+  const totalEmployees = allEmployeesCountData || employeesData?.totalElements || (employeesData?.content?.length || 0);
+  const activeEmployees = activeEmployeesCountData || (employeesData?.content?.filter((e) => e.employmentStatus === "ACTIVE").length || 0);
 
   const createMutation = useMutation({
     mutationFn: async (payload) => {
@@ -147,22 +170,65 @@ export default function EmployeesPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">
-            Employee Directory
-          </h1>
-          <p className="text-xs text-slate-500 dark:text-slate-400">
-            Workforce personnel profiles, organizational assignments, and biometric linkages
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-6 rounded-3xl bg-linear-to-r from-emerald-900 via-teal-900 to-slate-900 text-white shadow-xl">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/30 text-emerald-200 border border-emerald-400/30">
+              Workforce Personnel & Operations
+            </span>
+          </div>
+          <h1 className="text-2xl font-black tracking-tight">Employees Management</h1>
+          <p className="text-xs text-teal-200/80">
+            Manage workforce personnel, organizational assignments, departments, and biometric linkages
           </p>
         </div>
+
         <button
           onClick={openCreateModal}
-          className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs shadow-md shadow-indigo-600/20 transition-all self-start sm:self-auto"
+          className="flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs shadow-lg shadow-emerald-900/30 transition-all hover:scale-[1.02] active:scale-[0.98] self-start sm:self-auto"
         >
           <Plus size={16} />
           <span>Add Employee</span>
         </button>
+      </div>
+
+      {/* Metric Tiles */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs flex items-center justify-between">
+          <div>
+            <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">TOTAL EMPLOYEES</p>
+            <p className="text-2xl font-black text-slate-900 dark:text-white mt-0.5">
+              {Number(totalEmployees).toLocaleString()}
+            </p>
+          </div>
+          <div className="w-11 h-11 rounded-2xl bg-teal-50 dark:bg-teal-950/40 text-teal-600 dark:text-teal-400 flex items-center justify-center">
+            <Users size={20} />
+          </div>
+        </div>
+
+        <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs flex items-center justify-between">
+          <div>
+            <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">ACTIVE WORKFORCE</p>
+            <p className="text-2xl font-black text-emerald-500 dark:text-emerald-400 mt-0.5">
+              {Number(activeEmployees).toLocaleString()}
+            </p>
+          </div>
+          <div className="w-11 h-11 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 text-emerald-600 dark:text-emerald-400 flex items-center justify-center">
+            <UserCheck size={20} />
+          </div>
+        </div>
+
+        <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs flex items-center justify-between">
+          <div>
+            <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">ORGANIZATION UNITS</p>
+            <p className="text-sm font-bold text-slate-900 dark:text-white mt-1">
+              {departments?.length || 4} Active Departments
+            </p>
+          </div>
+          <div className="w-11 h-11 rounded-2xl bg-indigo-50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400 flex items-center justify-center">
+            <Building2 size={20} />
+          </div>
+        </div>
       </div>
 
       {/* Filter Bar */}
@@ -213,7 +279,13 @@ export default function EmployeesPage() {
       </div>
 
       {/* Employees Table */}
-      <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 overflow-hidden shadow-xs">
+      <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 overflow-hidden shadow-xs">
+        <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between text-xs">
+          <span className="font-bold text-slate-900 dark:text-white">
+            Employees Directory ({employeesData?.totalElements || employeesData?.content?.length || 0})
+          </span>
+          <span className="text-slate-400 font-medium">Staff & Workforce</span>
+        </div>
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse text-xs">
             <thead>
@@ -247,8 +319,12 @@ export default function EmployeesPage() {
                     <tr key={emp.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-colors">
                       <td className="py-3 px-4">
                         <div className="flex items-center gap-3">
-                          <div className="w-8 h-8 rounded-full bg-indigo-100 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 font-bold text-xs flex items-center justify-center shrink-0">
-                            {emp.englishName[0].toUpperCase()}
+                          <div className="w-8 h-8 rounded-full bg-indigo-100 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 font-bold text-xs flex items-center justify-center shrink-0 overflow-hidden border border-slate-200 dark:border-slate-700 shadow-2xs">
+                            {emp.profileImageUrl ? (
+                              <img src={emp.profileImageUrl} alt={emp.englishName} className="w-full h-full object-cover" />
+                            ) : (
+                              emp.englishName?.[0]?.toUpperCase() || "E"
+                            )}
                           </div>
                           <div>
                             <span className="font-bold text-slate-900 dark:text-white block">{emp.englishName}</span>
@@ -309,34 +385,43 @@ export default function EmployeesPage() {
         </div>
       </div>
 
-      {/* Modal: Add Employee */}
+      {/* Modal: Add / Edit Employee */}
       {showModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
-          <div className="w-full max-w-xl bg-white dark:bg-slate-900 rounded-3xl p-6 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4 max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
-              <h3 className="text-base font-bold text-slate-900 dark:text-white">
-                {editingEmployeeId ? "Edit Employee & Terminal PIN" : "Register New Employee"}
-              </h3>
-              <button onClick={() => setShowModal(false)} className="text-slate-400 hover:text-slate-600 text-lg">✕</button>
-            </div>
+        <Portal>
+          <div className="fixed inset-0 z-[9999] overflow-y-auto bg-slate-950/75 backdrop-blur-md animate-in fade-in duration-200">
+            <div className="min-h-full flex items-center justify-center p-3 sm:p-4">
+              <div className="w-full max-w-xl max-h-[88vh] flex flex-col bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200/80 dark:border-slate-800 overflow-hidden animate-in zoom-in-95 duration-200">
+                <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-800 shrink-0">
+                  <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                    {editingEmployeeId ? "Edit Employee & Terminal PIN" : "Register New Employee"}
+                  </h3>
+                  <button onClick={() => setShowModal(false)} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-lg">✕</button>
+                </div>
 
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                const payload = {
-                  ...formData,
-                  departmentId: formData.departmentId ? Number(formData.departmentId) : null,
-                  positionId: formData.positionId ? Number(formData.positionId) : null,
-                  branchId: formData.branchId ? Number(formData.branchId) : null,
-                };
-                if (editingEmployeeId) {
-                  updateMutation.mutate(payload);
-                } else {
-                  createMutation.mutate(payload);
-                }
-              }}
-              className="space-y-3.5 text-xs"
-            >
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const payload = {
+                      ...formData,
+                      departmentId: formData.departmentId ? Number(formData.departmentId) : null,
+                      positionId: formData.positionId ? Number(formData.positionId) : null,
+                      branchId: formData.branchId ? Number(formData.branchId) : null,
+                    };
+                    if (editingEmployeeId) {
+                      updateMutation.mutate(payload);
+                    } else {
+                      createMutation.mutate(payload);
+                    }
+                  }}
+                  className="flex flex-col flex-1 min-h-0 overflow-hidden"
+                >
+                  <div className="flex-1 min-h-0 overflow-y-auto p-5 sm:p-6 space-y-4 text-xs">
+                    <ImageUploadDropzone
+                      value={formData.profileImageUrl || ""}
+                      onChange={(url) => setFormData({ ...formData, profileImageUrl: url })}
+                      label="Employee Profile Photo"
+                      helperText="Drag & drop staff photo (Shows on Live Kiosk and Personnel Directory)"
+                    />
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">
@@ -472,18 +557,21 @@ export default function EmployeesPage() {
                 </div>
               </div>
 
-              <div className="pt-3 flex justify-end gap-2">
+              </div>
+
+              {/* Pinned Action Footer */}
+              <div className="px-6 py-4 bg-slate-50/80 dark:bg-slate-800/50 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end gap-2.5 shrink-0">
                 <button
                   type="button"
                   onClick={() => setShowModal(false)}
-                  className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 font-semibold"
+                  className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 font-semibold text-xs hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={createMutation.isPending || updateMutation.isPending}
-                  className="px-4 py-2 rounded-xl bg-indigo-600 text-white font-semibold hover:bg-indigo-500"
+                  className="px-4 py-2 rounded-xl bg-indigo-600 text-white font-semibold text-xs hover:bg-indigo-500 shadow-md shadow-indigo-600/20 disabled:opacity-50"
                 >
                   {editingEmployeeId
                     ? (updateMutation.isPending ? "Updating..." : "Update Employee")
@@ -493,7 +581,9 @@ export default function EmployeesPage() {
             </form>
           </div>
         </div>
-      )}
+      </div>
+    </Portal>
+  )}
     </div>
   );
 }

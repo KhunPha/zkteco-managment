@@ -63,6 +63,10 @@ public class AttendanceDeviceUser extends BaseEntity {
     @Column(name = "sync_status", nullable = false, length = 50)
     private String syncStatus = "SYNCED"; // SYNCED, PENDING_UPLOAD, PENDING_DELETE, ERROR
 
+    @Builder.Default
+    @Column(nullable = false, length = 50)
+    private String status = "ACTIVE"; // ACTIVE, INACTIVE
+
     @Column(name = "last_synced_at")
     private Instant lastSyncedAt;
 }

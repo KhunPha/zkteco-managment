@@ -20,5 +20,6 @@ public class StudentDto {
     private String academicYear;
     private String parentContact;
     private String status;
+    private String profileImageUrl;
 }
 

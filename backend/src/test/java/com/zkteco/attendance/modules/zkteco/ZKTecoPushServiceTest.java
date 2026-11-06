@@ -1,5 +1,6 @@
 package com.zkteco.attendance.modules.zkteco;
 
+import com.zkteco.attendance.modules.attendance.AttendanceCalculationEngine;
 import com.zkteco.attendance.modules.attendance.AttendanceRawLog;
 import com.zkteco.attendance.modules.attendance.AttendanceRawLogRepository;
 import com.zkteco.attendance.modules.device.AttendanceDevice;
@@ -31,6 +32,8 @@ class ZKTecoPushServiceTest {
     private AttendanceRawLogRepository rawLogRepository;
     @Mock
     private DeviceSyncLogRepository syncLogRepository;
+    @Mock
+    private AttendanceCalculationEngine calculationEngine;
 
     @InjectMocks
     private ZKTecoPushService pushService;

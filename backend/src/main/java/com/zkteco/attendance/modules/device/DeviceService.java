@@ -1,5 +1,6 @@
 package com.zkteco.attendance.modules.device;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.zkteco.attendance.common.AppException;
 import com.zkteco.attendance.common.ErrorCode;
 import com.zkteco.attendance.common.PageResponse;
@@ -11,12 +12,16 @@ import com.zkteco.attendance.modules.device.dto.*;
 import com.zkteco.attendance.modules.organization.BranchRepository;
 import com.zkteco.attendance.modules.organization.DepartmentRepository;
 import com.zkteco.attendance.modules.personnel.Employee;
+import com.zkteco.attendance.modules.personnel.Employee;
 import com.zkteco.attendance.modules.personnel.EmployeeRepository;
+import com.zkteco.attendance.modules.personnel.Student;
 import com.zkteco.attendance.modules.personnel.StudentRepository;
 import com.zkteco.attendance.modules.zkteco.DeviceInfo;
 import com.zkteco.attendance.modules.zkteco.RawAttendanceRecord;
 import com.zkteco.attendance.modules.zkteco.RawDeviceUser;
 import com.zkteco.attendance.modules.zkteco.ZKTecoTcpClient;
+import jakarta.persistence.criteria.Join;
+import jakarta.persistence.criteria.JoinType;
 import jakarta.persistence.criteria.Predicate;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -29,7 +34,9 @@ import org.springframework.transaction.annotation.Transactional;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -51,6 +58,9 @@ public class DeviceService {
     private final EmployeeRepository employeeRepository;
     private final StudentRepository studentRepository;
     private final ZKTecoTcpClient tcpClient;
+    private final CardHistoryRepository cardHistoryRepository;
+    private final TerminalSyncService terminalSyncService;
+    private final ZkDeviceMasterControlService masterControlService;
 
     // Devices CRUD
     @Transactional(readOnly = true)
@@ -146,29 +156,38 @@ public class DeviceService {
     public boolean testConnection(Long id) {
         AttendanceDevice device = findDevice(id);
         boolean reachable = false;
-        boolean isAdms = "ADMS_PUSH".equalsIgnoreCase(device.getIntegrationType()) ||
-                         "ADMS".equalsIgnoreCase(device.getIntegrationType());
 
-        if (isAdms) {
-            // 1. For ADMS Push: check recent heartbeat communication (within last 10 minutes)
-            if (device.getLastCommunication() != null &&
-                    device.getLastCommunication().isAfter(Instant.now().minusSeconds(600))) {
+        // First attempt direct TCP probe via master control utility if IP is present
+        if (device.getIpAddress() != null && !device.getIpAddress().isBlank()) {
+            JsonNode info = masterControlService.execute(device.getIpAddress(), device.getPort(), "get-info", null);
+            if (info != null && info.path("success").asBoolean(false)) {
                 reachable = true;
+                if (info.hasNonNull("firmware_version") && !info.path("firmware_version").asText().isBlank()) {
+                    device.setFirmwareVersion(info.path("firmware_version").asText());
+                }
             }
-            // 2. Built-in simulator responds as online
-            else if (device.getSerialNumber() != null && device.getSerialNumber().startsWith("ZK-SIM")) {
-                reachable = true;
-            }
-            // 3. Fallback: try socket probe if an IP is configured
-            else if (device.getIpAddress() != null && !device.getIpAddress().isBlank()) {
-                reachable = tcpClient.testConnection(device.getIpAddress(), device.getPort(), device.getCommKey());
-            }
-        } else {
-            // TCP_PULL protocol
-            if (device.getIpAddress() != null && !device.getIpAddress().isBlank()) {
-                reachable = tcpClient.testConnection(device.getIpAddress(), device.getPort(), device.getCommKey());
-            } else if (device.getSerialNumber() != null && device.getSerialNumber().startsWith("ZK-SIM")) {
-                reachable = true;
+        }
+
+        if (!reachable) {
+            boolean isAdms = "ADMS_PUSH".equalsIgnoreCase(device.getIntegrationType()) ||
+                             "ADMS".equalsIgnoreCase(device.getIntegrationType());
+
+            if (isAdms) {
+                // For ADMS Push: check recent heartbeat communication (within last 10 minutes)
+                if (device.getLastCommunication() != null &&
+                        device.getLastCommunication().isAfter(Instant.now().minusSeconds(600))) {
+                    reachable = true;
+                } else if (device.getSerialNumber() != null && device.getSerialNumber().startsWith("ZK-SIM")) {
+                    reachable = true;
+                } else if (device.getIpAddress() != null && !device.getIpAddress().isBlank()) {
+                    reachable = tcpClient.testConnection(device.getIpAddress(), device.getPort(), device.getCommKey());
+                }
+            } else {
+                if (device.getIpAddress() != null && !device.getIpAddress().isBlank()) {
+                    reachable = tcpClient.testConnection(device.getIpAddress(), device.getPort(), device.getCommKey());
+                } else if (device.getSerialNumber() != null && device.getSerialNumber().startsWith("ZK-SIM")) {
+                    reachable = true;
+                }
             }
         }
 
@@ -183,28 +202,183 @@ public class DeviceService {
     }
 
     @Transactional
-    public boolean syncTime(Long id) {
+    public DeviceControlResponseDto syncTime(Long id) {
         AttendanceDevice device = findDevice(id);
         boolean success = false;
-        boolean isAdms = "ADMS_PUSH".equalsIgnoreCase(device.getIntegrationType()) ||
-                         "ADMS".equalsIgnoreCase(device.getIntegrationType());
+        String message = "";
+        Double drift = null;
+        String machineTime = null;
+        String computerTime = null;
 
-        if (isAdms) {
-            // For ADMS push, queue SET TIME command
-            queueCommand(device, "SET TIME " + TimeUtils.formatPhnomPenh(Instant.now()));
-            device.setLastCommunication(Instant.now());
-            deviceRepository.save(device);
-            success = true;
-        } else {
-            success = tcpClient.syncDeviceTime(device.getIpAddress(), device.getPort(), device.getCommKey(), Instant.now());
-            if (success) {
+        if (device.getIpAddress() != null && !device.getIpAddress().isBlank()) {
+            JsonNode res = masterControlService.execute(device.getIpAddress(), device.getPort(), "sync-time", null);
+            if (res != null && res.path("success").asBoolean(false)) {
+                success = true;
+                message = res.path("message").asText("Hardware clock synchronized successfully");
+                drift = res.hasNonNull("drift_seconds") ? res.path("drift_seconds").asDouble() : 0.0;
+                machineTime = res.path("machine_time").asText(null);
+                computerTime = res.path("computer_time").asText(null);
+
+                device.setConnectionStatus("ONLINE");
                 device.setLastCommunication(Instant.now());
                 deviceRepository.save(device);
+            } else {
+                message = res != null && res.hasNonNull("message") ? res.path("message").asText() : "TCP sync failed";
             }
         }
 
-        recordOperation(device, "SYNC_TIME", "TargetTime=" + Instant.now(), success ? "SUCCESS" : "FAILED", null);
-        return success;
+        if (!success) {
+            boolean isAdms = "ADMS_PUSH".equalsIgnoreCase(device.getIntegrationType()) ||
+                             "ADMS".equalsIgnoreCase(device.getIntegrationType());
+            if (isAdms) {
+                queueCommand(device, "SET TIME " + TimeUtils.formatPhnomPenh(Instant.now()));
+                device.setLastCommunication(Instant.now());
+                deviceRepository.save(device);
+                success = true;
+                message = "Queued ADMS SET TIME command";
+            }
+        }
+
+        recordOperation(device, "SYNC_TIME", "TargetTime=" + Instant.now() + " Result=" + message, success ? "SUCCESS" : "FAILED", success ? null : message);
+
+        return DeviceControlResponseDto.builder()
+                .deviceId(device.getId())
+                .deviceName(device.getName())
+                .serialNumber(device.getSerialNumber())
+                .ipAddress(device.getIpAddress())
+                .success(success)
+                .action("SYNC_TIME")
+                .message(message)
+                .driftSeconds(drift)
+                .machineTime(machineTime)
+                .computerTime(computerTime)
+                .build();
+    }
+
+    @Transactional
+    public List<DeviceControlResponseDto> syncAllDevicesTime() {
+        List<AttendanceDevice> devices = deviceRepository.findAll().stream()
+                .filter(AttendanceDevice::isActive)
+                .toList();
+
+        List<DeviceControlResponseDto> results = new ArrayList<>();
+        for (AttendanceDevice device : devices) {
+            try {
+                results.add(syncTime(device.getId()));
+            } catch (Exception e) {
+                log.error("Failed to sync time for device {}: {}", device.getName(), e.getMessage());
+                results.add(DeviceControlResponseDto.builder()
+                        .deviceId(device.getId())
+                        .deviceName(device.getName())
+                        .serialNumber(device.getSerialNumber())
+                        .ipAddress(device.getIpAddress())
+                        .success(false)
+                        .action("SYNC_TIME")
+                        .message("Sync error: " + e.getMessage())
+                        .build());
+            }
+        }
+        return results;
+    }
+
+    @Transactional
+    public DeviceLiveStatusDto getDeviceLiveStatus(Long id) {
+        AttendanceDevice device = findDevice(id);
+
+        if (device.getIpAddress() != null && !device.getIpAddress().isBlank()) {
+            JsonNode info = masterControlService.execute(device.getIpAddress(), device.getPort(), "get-info", null);
+            if (info != null && info.path("success").asBoolean(false)) {
+                device.setConnectionStatus("ONLINE");
+                if (info.hasNonNull("firmware_version") && !info.path("firmware_version").asText().isBlank()) {
+                    device.setFirmwareVersion(info.path("firmware_version").asText());
+                }
+                device.setLastCommunication(Instant.now());
+                deviceRepository.save(device);
+
+                return DeviceLiveStatusDto.builder()
+                        .deviceId(device.getId())
+                        .deviceName(device.getName())
+                        .serialNumber(info.path("serial_number").asText(device.getSerialNumber()))
+                        .ipAddress(device.getIpAddress())
+                        .port(device.getPort())
+                        .online(true)
+                        .machineTime(info.path("machine_time").asText(null))
+                        .computerTime(info.path("computer_time").asText(null))
+                        .driftSeconds(info.hasNonNull("drift_seconds") ? info.path("drift_seconds").asDouble() : null)
+                        .usersCount(info.hasNonNull("users_count") ? info.path("users_count").asInt() : null)
+                        .attendanceCount(info.hasNonNull("attendance_count") ? info.path("attendance_count").asInt() : null)
+                        .firmwareVersion(info.path("firmware_version").asText(device.getFirmwareVersion()))
+                        .platform(info.path("platform").asText(null))
+                        .macAddress(info.path("mac_address").asText(null))
+                        .message("Live hardware status retrieved")
+                        .build();
+            }
+        }
+
+        return DeviceLiveStatusDto.builder()
+                .deviceId(device.getId())
+                .deviceName(device.getName())
+                .serialNumber(device.getSerialNumber())
+                .ipAddress(device.getIpAddress())
+                .port(device.getPort())
+                .online("ONLINE".equalsIgnoreCase(device.getConnectionStatus()))
+                .firmwareVersion(device.getFirmwareVersion())
+                .message("Device offline or unreachable via TCP")
+                .build();
+    }
+
+    @Transactional
+    public DeviceControlResponseDto controlDevice(Long id, DeviceControlRequest request) {
+        AttendanceDevice device = findDevice(id);
+        String action = request.getAction().trim().toUpperCase();
+
+        if ("SYNC_TIME".equals(action)) {
+            return syncTime(id);
+        }
+
+        String command;
+        switch (action) {
+            case "RESTART" -> command = "restart";
+            case "POWER_OFF" -> command = "poweroff";
+            case "DISABLE" -> command = "disable";
+            case "ENABLE" -> command = "enable";
+            case "TEST_VOICE" -> command = "test-voice";
+            case "CLEAR_LOGS" -> command = "clear-attlog";
+            case "CLEAR_ADMIN" -> command = "clear-admin";
+            case "UNLOCK_DOOR" -> command = "unlock-door";
+            default -> throw new AppException(ErrorCode.BAD_REQUEST, "Unknown device control action: " + action);
+        }
+
+        boolean success = false;
+        String message = "";
+
+        if (device.getIpAddress() != null && !device.getIpAddress().isBlank()) {
+            JsonNode res = masterControlService.execute(device.getIpAddress(), device.getPort(), command, request.getVoiceIndex());
+            if (res != null) {
+                success = res.path("success").asBoolean(false);
+                message = res.path("message").asText(success ? "Operation completed" : "Operation failed");
+            }
+        }
+
+        if (!success && ("ADMS_PUSH".equalsIgnoreCase(device.getIntegrationType()) || "ADMS".equalsIgnoreCase(device.getIntegrationType()))) {
+            if ("RESTART".equals(action)) {
+                queueCommand(device, "REBOOT");
+                success = true;
+                message = "Queued ADMS REBOOT command";
+            }
+        }
+
+        recordOperation(device, action, "Params: voiceIndex=" + request.getVoiceIndex(), success ? "SUCCESS" : "FAILED", success ? null : message);
+
+        return DeviceControlResponseDto.builder()
+                .deviceId(device.getId())
+                .deviceName(device.getName())
+                .serialNumber(device.getSerialNumber())
+                .ipAddress(device.getIpAddress())
+                .success(success)
+                .action(action)
+                .message(message)
+                .build();
     }
 
     @Transactional
@@ -266,43 +440,145 @@ public class DeviceService {
 
     @Transactional
     public boolean restartDevice(Long id) {
+        DeviceControlResponseDto resp = controlDevice(id, DeviceControlRequest.builder().action("RESTART").build());
+        return resp.isSuccess();
+    }
+
+    public JsonNode getDeviceMenuParameters(Long id) {
         AttendanceDevice device = findDevice(id);
-        boolean success = false;
-        boolean isAdms = "ADMS_PUSH".equalsIgnoreCase(device.getIntegrationType()) ||
-                         "ADMS".equalsIgnoreCase(device.getIntegrationType());
+        return masterControlService.getMenuParameters(device.getIpAddress(), device.getPort());
+    }
 
-        if (isAdms) {
-            queueCommand(device, "REBOOT");
-            success = true;
-        } else {
-            success = tcpClient.restartDevice(device.getIpAddress(), device.getPort(), device.getCommKey());
-        }
-
-        recordOperation(device, "RESTART", "Reboot trigger", success ? "SUCCESS" : "FAILED", null);
-        return success;
+    @Transactional
+    public JsonNode setDeviceMenuParameters(Long id, JsonNode params) {
+        AttendanceDevice device = findDevice(id);
+        JsonNode result = masterControlService.setMenuParameters(device.getIpAddress(), device.getPort(), params);
+        recordOperation(device, "SET_MENU_PARAMETERS", "Params: " + params, result != null && result.path("success").asBoolean(false) ? "SUCCESS" : "FAILED", null);
+        return result;
     }
 
     // Device Users
     @Transactional(readOnly = true)
     public PageResponse<DeviceUserDto> getDeviceUsers(Long deviceId, String search, Pageable pageable) {
+        return getDeviceUsers(deviceId, search, null, null, null, null, pageable);
+    }
+
+    @Transactional(readOnly = true)
+    public PageResponse<DeviceUserDto> getDeviceUsers(Long deviceId, String search, String status, Pageable pageable) {
+        return getDeviceUsers(deviceId, search, status, null, null, null, pageable);
+    }
+
+    @Transactional(readOnly = true)
+    public PageResponse<DeviceUserDto> getDeviceUsers(
+            Long deviceId, String search, String status, String biometricFilter, String personnelType, String sortBy, Pageable pageable) {
         Specification<AttendanceDeviceUser> spec = (root, query, cb) -> {
             List<Predicate> predicates = new ArrayList<>();
             if (deviceId != null) {
                 predicates.add(cb.equal(root.get("device").get("id"), deviceId));
             }
+            if (status != null && !status.trim().isEmpty() && !"ALL".equalsIgnoreCase(status)) {
+                predicates.add(cb.equal(cb.upper(root.get("status")), status.trim().toUpperCase()));
+            }
+
+            if (biometricFilter != null && !biometricFilter.trim().isEmpty() && !"ALL".equalsIgnoreCase(biometricFilter)) {
+                if ("HAS_FP".equalsIgnoreCase(biometricFilter)) {
+                    predicates.add(cb.gt(root.get("fingerprintCount"), 0));
+                } else if ("NO_FP".equalsIgnoreCase(biometricFilter)) {
+                    predicates.add(cb.equal(root.get("fingerprintCount"), 0));
+                } else if ("HAS_CARD".equalsIgnoreCase(biometricFilter)) {
+                    predicates.add(cb.and(
+                            cb.isNotNull(root.get("cardNumber")),
+                            cb.notEqual(root.get("cardNumber"), "")
+                    ));
+                } else if ("NO_CARD".equalsIgnoreCase(biometricFilter)) {
+                    predicates.add(cb.or(
+                            cb.isNull(root.get("cardNumber")),
+                            cb.equal(root.get("cardNumber"), "")
+                    ));
+                }
+            }
+
+            if (personnelType != null && !personnelType.trim().isEmpty() && !"ALL".equalsIgnoreCase(personnelType)) {
+                if ("STUDENT".equalsIgnoreCase(personnelType)) {
+                    predicates.add(cb.isNotNull(root.get("student")));
+                } else if ("EMPLOYEE".equalsIgnoreCase(personnelType) || "TEACHER".equalsIgnoreCase(personnelType)) {
+                    predicates.add(cb.isNotNull(root.get("employee")));
+                } else if ("UNMAPPED".equalsIgnoreCase(personnelType)) {
+                    predicates.add(cb.and(cb.isNull(root.get("employee")), cb.isNull(root.get("student"))));
+                }
+            }
+
             if (search != null && !search.trim().isEmpty()) {
                 String pattern = "%" + search.trim().toLowerCase() + "%";
+                Join<AttendanceDeviceUser, Employee> empJoin = root.join("employee", JoinType.LEFT);
+                Join<AttendanceDeviceUser, Student> stuJoin = root.join("student", JoinType.LEFT);
                 predicates.add(cb.or(
                         cb.like(cb.lower(root.get("devicePin")), pattern),
-                        cb.like(cb.lower(root.get("nameOnDevice")), pattern)
+                        cb.like(cb.lower(cb.coalesce(root.get("nameOnDevice"), "")), pattern),
+                        cb.like(cb.lower(cb.coalesce(root.get("cardNumber"), "")), pattern),
+                        cb.like(cb.lower(cb.coalesce(empJoin.get("englishName"), "")), pattern),
+                        cb.like(cb.lower(cb.coalesce(empJoin.get("khmerName"), "")), pattern),
+                        cb.like(cb.lower(cb.coalesce(empJoin.get("employeeCode"), "")), pattern),
+                        cb.like(cb.lower(cb.coalesce(stuJoin.get("englishName"), "")), pattern),
+                        cb.like(cb.lower(cb.coalesce(stuJoin.get("khmerName"), "")), pattern),
+                        cb.like(cb.lower(cb.coalesce(stuJoin.get("studentCode"), "")), pattern)
                 ));
             }
+
+            // Natural numeric and user-directed sorting
+            if (query != null && !Long.class.equals(query.getResultType())) {
+                if ("PIN_ASC".equalsIgnoreCase(sortBy)) {
+                    query.orderBy(cb.asc(cb.length(root.get("devicePin"))), cb.asc(root.get("devicePin")));
+                } else if ("PIN_DESC".equalsIgnoreCase(sortBy)) {
+                    query.orderBy(cb.desc(cb.length(root.get("devicePin"))), cb.desc(root.get("devicePin")));
+                } else if ("NAME_ASC".equalsIgnoreCase(sortBy)) {
+                    query.orderBy(cb.asc(cb.lower(cb.coalesce(root.get("nameOnDevice"), ""))));
+                } else if ("NAME_DESC".equalsIgnoreCase(sortBy)) {
+                    query.orderBy(cb.desc(cb.lower(cb.coalesce(root.get("nameOnDevice"), ""))));
+                } else if ("FP_FIRST".equalsIgnoreCase(sortBy)) {
+                    query.orderBy(cb.desc(root.get("fingerprintCount")), cb.asc(cb.length(root.get("devicePin"))), cb.asc(root.get("devicePin")));
+                } else if ("NO_FP_FIRST".equalsIgnoreCase(sortBy)) {
+                    query.orderBy(cb.asc(root.get("fingerprintCount")), cb.asc(cb.length(root.get("devicePin"))), cb.asc(root.get("devicePin")));
+                } else if ("CARD_FIRST".equalsIgnoreCase(sortBy)) {
+                    query.orderBy(cb.desc(cb.coalesce(root.get("cardNumber"), "")), cb.asc(cb.length(root.get("devicePin"))), cb.asc(root.get("devicePin")));
+                } else if ("RECENT".equalsIgnoreCase(sortBy)) {
+                    query.orderBy(cb.desc(cb.coalesce(root.get("lastSyncedAt"), root.get("id"))));
+                } else {
+                    // Default: Natural numeric PIN ascending (1, 2, 3 ... 1000 ... 40001)
+                    query.orderBy(cb.asc(cb.length(root.get("devicePin"))), cb.asc(root.get("devicePin")));
+                }
+            }
+
             return cb.and(predicates.toArray(new Predicate[0]));
         };
 
         Page<AttendanceDeviceUser> page = deviceUserRepository.findAll(spec, pageable);
-        List<DeviceUserDto> dtos = page.getContent().stream().map(this::toDeviceUserDto).collect(Collectors.toList());
+        Map<String, Integer> countMap = new HashMap<>();
+        try {
+            List<Object[]> counts = cardHistoryRepository.countGroupedByDevicePin();
+            for (Object[] row : counts) {
+                if (row != null && row.length >= 2 && row[0] != null && row[1] != null) {
+                    countMap.put((String) row[0], ((Number) row[1]).intValue());
+                }
+            }
+        } catch (Exception ignored) {}
+
+        List<DeviceUserDto> dtos = page.getContent().stream()
+                .map(u -> toDeviceUserDto(u, countMap.getOrDefault(u.getDevicePin(), 0)))
+                .collect(Collectors.toList());
         return PageResponse.of(page, dtos);
+    }
+
+    @Transactional
+    public DeviceUserDto updateDeviceUserStatus(Long id, String status) {
+        AttendanceDeviceUser devUser = deviceUserRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("DeviceUser", "id", id));
+        String newStatus = "INACTIVE".equalsIgnoreCase(status) ? "INACTIVE" : "ACTIVE";
+        devUser.setStatus(newStatus);
+        devUser.setSyncStatus("SYNCED");
+        devUser.setLastSyncedAt(Instant.now());
+        AttendanceDeviceUser saved = deviceUserRepository.save(devUser);
+        return toDeviceUserDto(saved);
     }
 
     @Transactional
@@ -354,7 +630,13 @@ public class DeviceService {
 
         devUser.setNameOnDevice(request.getNameOnDevice());
         if (request.getPrivilege() != null) devUser.setPrivilege(request.getPrivilege());
-        if (request.getCardNumber() != null) devUser.setCardNumber(request.getCardNumber());
+        if (request.getCardNumber() != null) {
+            String newCard = request.getCardNumber().trim();
+            if (devUser.getCardNumber() == null || !devUser.getCardNumber().equals(newCard)) {
+                recordCardTransition(devUser, devUser.getCardNumber(), newCard, "2026-2027", "Device user profile update", LocalDate.now(), null);
+                devUser.setCardNumber(newCard);
+            }
+        }
         if (request.getPassword() != null) devUser.setPassword(request.getPassword());
         if (request.getFaceEnrolled() != null) devUser.setFaceEnrolled(request.getFaceEnrolled());
         if (request.getFingerprintCount() != null) devUser.setFingerprintCount(request.getFingerprintCount());
@@ -374,7 +656,21 @@ public class DeviceService {
             List<AttendanceDeviceUser> siblings = deviceUserRepository.findByEmployeeId(saved.getEmployee().getId());
             for (AttendanceDeviceUser sib : siblings) {
                 if (!sib.getId().equals(saved.getId())) {
-                    if (request.getCardNumber() != null) sib.setCardNumber(request.getCardNumber());
+                    if (request.getCardNumber() != null) sib.setCardNumber(request.getCardNumber().trim());
+                    if (request.getPassword() != null) sib.setPassword(request.getPassword());
+                    if (request.getNameOnDevice() != null) sib.setNameOnDevice(request.getNameOnDevice());
+                    if (request.getFaceEnrolled() != null) sib.setFaceEnrolled(request.getFaceEnrolled());
+                    if (request.getFingerprintCount() != null) sib.setFingerprintCount(request.getFingerprintCount());
+                    sib.setLastSyncedAt(Instant.now());
+                    AttendanceDeviceUser sibSaved = deviceUserRepository.save(sib);
+                    queueUserToDevice(sibSaved.getDevice(), sibSaved);
+                }
+            }
+        } else if (saved.getStudent() != null) {
+            List<AttendanceDeviceUser> siblings = deviceUserRepository.findByStudentId(saved.getStudent().getId());
+            for (AttendanceDeviceUser sib : siblings) {
+                if (!sib.getId().equals(saved.getId())) {
+                    if (request.getCardNumber() != null) sib.setCardNumber(request.getCardNumber().trim());
                     if (request.getPassword() != null) sib.setPassword(request.getPassword());
                     if (request.getNameOnDevice() != null) sib.setNameOnDevice(request.getNameOnDevice());
                     if (request.getFaceEnrolled() != null) sib.setFaceEnrolled(request.getFaceEnrolled());
@@ -396,7 +692,13 @@ public class DeviceService {
 
         if (faceEnrolled != null) devUser.setFaceEnrolled(faceEnrolled);
         if (fingerprintCount != null) devUser.setFingerprintCount(fingerprintCount);
-        if (cardNumber != null) devUser.setCardNumber(cardNumber);
+        if (cardNumber != null) {
+            String newCard = cardNumber.trim();
+            if (devUser.getCardNumber() == null || !devUser.getCardNumber().equals(newCard)) {
+                recordCardTransition(devUser, devUser.getCardNumber(), newCard, "2026-2027", "Biometric enrollment update", LocalDate.now(), null);
+                devUser.setCardNumber(newCard);
+            }
+        }
         devUser.setLastSyncedAt(Instant.now());
 
         AttendanceDeviceUser saved = deviceUserRepository.save(devUser);
@@ -406,7 +708,19 @@ public class DeviceService {
             List<AttendanceDeviceUser> siblings = deviceUserRepository.findByEmployeeId(saved.getEmployee().getId());
             for (AttendanceDeviceUser sib : siblings) {
                 if (!sib.getId().equals(saved.getId())) {
-                    if (cardNumber != null) sib.setCardNumber(cardNumber);
+                    if (cardNumber != null) sib.setCardNumber(cardNumber.trim());
+                    if (faceEnrolled != null) sib.setFaceEnrolled(faceEnrolled);
+                    if (fingerprintCount != null) sib.setFingerprintCount(fingerprintCount);
+                    sib.setLastSyncedAt(Instant.now());
+                    AttendanceDeviceUser sibSaved = deviceUserRepository.save(sib);
+                    queueUserToDevice(sibSaved.getDevice(), sibSaved);
+                }
+            }
+        } else if (saved.getStudent() != null) {
+            List<AttendanceDeviceUser> siblings = deviceUserRepository.findByStudentId(saved.getStudent().getId());
+            for (AttendanceDeviceUser sib : siblings) {
+                if (!sib.getId().equals(saved.getId())) {
+                    if (cardNumber != null) sib.setCardNumber(cardNumber.trim());
                     if (faceEnrolled != null) sib.setFaceEnrolled(faceEnrolled);
                     if (fingerprintCount != null) sib.setFingerprintCount(fingerprintCount);
                     sib.setLastSyncedAt(Instant.now());
@@ -423,9 +737,151 @@ public class DeviceService {
         return toDeviceUserDto(saved);
     }
 
+    /**
+     * Change Card Number for annual re-issue, card replacement, or renewal while preserving historical cards.
+     */
+    @Transactional
+    public DeviceUserDto changeCardNumber(Long deviceUserId, ChangeCardRequest request) {
+        AttendanceDeviceUser devUser = deviceUserRepository.findById(deviceUserId)
+                .orElseThrow(() -> new ResourceNotFoundException("DeviceUser", "id", deviceUserId));
+
+        String newCard = request.getNewCardNumber() != null ? request.getNewCardNumber().trim() : "";
+        String oldCard = devUser.getCardNumber();
+        String academicYear = request.getAcademicYear() != null ? request.getAcademicYear() : "2026-2027";
+        String notes = request.getNotes() != null ? request.getNotes() : "Annual RFID Card Renewal";
+        LocalDate issuedDate = request.getIssuedDate() != null ? request.getIssuedDate() : LocalDate.now();
+
+        // 1. Record transition in Card History
+        recordCardTransition(devUser, oldCard, newCard, academicYear, notes, issuedDate, request.getExpiryDate());
+
+        // 2. Update active card on Device User
+        devUser.setCardNumber(newCard);
+        devUser.setLastSyncedAt(Instant.now());
+        AttendanceDeviceUser saved = deviceUserRepository.save(devUser);
+        queueUserToDevice(saved.getDevice(), saved);
+
+        // 3. Update sibling device users across all physical terminals
+        if (saved.getEmployee() != null) {
+            List<AttendanceDeviceUser> siblings = deviceUserRepository.findByEmployeeId(saved.getEmployee().getId());
+            for (AttendanceDeviceUser sib : siblings) {
+                if (!sib.getId().equals(saved.getId())) {
+                    sib.setCardNumber(newCard);
+                    sib.setLastSyncedAt(Instant.now());
+                    AttendanceDeviceUser sibSaved = deviceUserRepository.save(sib);
+                    queueUserToDevice(sibSaved.getDevice(), sibSaved);
+                }
+            }
+        } else if (saved.getStudent() != null) {
+            List<AttendanceDeviceUser> siblings = deviceUserRepository.findByStudentId(saved.getStudent().getId());
+            for (AttendanceDeviceUser sib : siblings) {
+                if (!sib.getId().equals(saved.getId())) {
+                    sib.setCardNumber(newCard);
+                    sib.setLastSyncedAt(Instant.now());
+                    AttendanceDeviceUser sibSaved = deviceUserRepository.save(sib);
+                    queueUserToDevice(sibSaved.getDevice(), sibSaved);
+                }
+            }
+        }
+
+        recordOperation(saved.getDevice(), "CHANGE_CARD_NUMBER",
+                "PIN=" + saved.getDevicePin() + " OldCard=" + oldCard + " NewCard=" + newCard + " Year=" + academicYear,
+                "SUCCESS", null);
+
+        return toDeviceUserDto(saved);
+    }
+
+    private void recordCardTransition(AttendanceDeviceUser user, String oldCard, String newCard, String academicYear,
+                                       String notes, LocalDate issuedDate, LocalDate expiryDate) {
+        if (oldCard != null && !oldCard.isBlank() && !oldCard.equals(newCard)) {
+            // Mark previous active cards for this pin as REPLACED
+            List<CardHistory> activeHistories = cardHistoryRepository.findByDevicePinOrderByCreatedAtDesc(user.getDevicePin());
+            for (CardHistory ch : activeHistories) {
+                if ("ACTIVE".equalsIgnoreCase(ch.getStatus())) {
+                    ch.setStatus("REPLACED");
+                    ch.setReplacedAt(Instant.now());
+                    cardHistoryRepository.save(ch);
+                }
+            }
+        }
+
+        if (newCard != null && !newCard.isBlank()) {
+            CardHistory history = CardHistory.builder()
+                    .devicePin(user.getDevicePin())
+                    .cardNumber(newCard)
+                    .previousCardNumber(oldCard)
+                    .academicYear(academicYear != null ? academicYear : "2026-2027")
+                    .status("ACTIVE")
+                    .issuedDate(issuedDate != null ? issuedDate : LocalDate.now())
+                    .expiryDate(expiryDate)
+                    .notes(notes)
+                    .employee(user.getEmployee())
+                    .student(user.getStudent())
+                    .build();
+            cardHistoryRepository.save(history);
+        }
+    }
+
+    @Transactional(readOnly = true)
+    public List<CardHistoryDto> getCardHistory(Long deviceUserId) {
+        AttendanceDeviceUser devUser = deviceUserRepository.findById(deviceUserId)
+                .orElseThrow(() -> new ResourceNotFoundException("DeviceUser", "id", deviceUserId));
+        return getCardHistoryByPin(devUser.getDevicePin());
+    }
+
+    @Transactional(readOnly = true)
+    public List<CardHistoryDto> getCardHistoryByPin(String pin) {
+        return cardHistoryRepository.findByDevicePinOrderByCreatedAtDesc(pin).stream()
+                .map(this::toCardHistoryDto)
+                .collect(Collectors.toList());
+    }
+
+    @Transactional(readOnly = true)
+    public PageResponse<CardHistoryDto> getAllCardHistory(String search, Pageable pageable) {
+        Page<CardHistory> page;
+        if (search != null && !search.trim().isEmpty()) {
+            String pattern = "%" + search.trim().toLowerCase() + "%";
+            Specification<CardHistory> spec = (root, query, cb) -> cb.or(
+                    cb.like(cb.lower(root.get("devicePin")), pattern),
+                    cb.like(cb.lower(root.get("cardNumber")), pattern),
+                    cb.like(cb.lower(root.get("academicYear")), pattern)
+            );
+            page = cardHistoryRepository.findAll(spec, pageable);
+        } else {
+            page = cardHistoryRepository.findAllByOrderByCreatedAtDesc(pageable);
+        }
+
+        List<CardHistoryDto> dtos = page.getContent().stream().map(this::toCardHistoryDto).toList();
+        return PageResponse.of(page, dtos);
+    }
+
+    public CardHistoryDto toCardHistoryDto(CardHistory ch) {
+        return CardHistoryDto.builder()
+                .id(ch.getId())
+                .devicePin(ch.getDevicePin())
+                .cardNumber(ch.getCardNumber())
+                .previousCardNumber(ch.getPreviousCardNumber())
+                .academicYear(ch.getAcademicYear())
+                .status(ch.getStatus())
+                .issuedDate(ch.getIssuedDate())
+                .expiryDate(ch.getExpiryDate())
+                .replacedAt(ch.getReplacedAt())
+                .notes(ch.getNotes())
+                .employeeId(ch.getEmployee() != null ? ch.getEmployee().getId() : null)
+                .employeeName(ch.getEmployee() != null ? ch.getEmployee().getEnglishName() : null)
+                .studentId(ch.getStudent() != null ? ch.getStudent().getId() : null)
+                .studentName(ch.getStudent() != null ? ch.getStudent().getEnglishName() : null)
+                .createdAt(ch.getCreatedAt())
+                .build();
+    }
+
     @Transactional
     public void deleteDeviceUser(Long id) {
-        deviceUserRepository.deleteById(id);
+        deviceUserRepository.findById(id).ifPresent(u -> {
+            try {
+                terminalSyncService.deleteUserFromPhysicalMachinesAsync(u.getDevicePin());
+            } catch (Exception ignored) {}
+            deviceUserRepository.delete(u);
+        });
     }
 
     @Transactional
@@ -565,10 +1021,17 @@ public class DeviceService {
                     user.getDevicePin(), name, priCode, pwd, card);
             queueCommand(device, cmd);
         } else if (device.getIpAddress() != null && !device.getIpAddress().isBlank()) {
-            // Standalone TCP/IP Protocol
+            // Standalone TCP/IP Protocol - Direct synchronization to physical biometric terminal
             try {
-                tcpClient.setUserInfo(device.getIpAddress(), device.getPort(), device.getCommKey(),
-                        user.getDevicePin(), user.getNameOnDevice(), user.getPassword(), user.getPrivilege(), user.getCardNumber());
+                terminalSyncService.syncUserToPhysicalMachinesAsync(
+                        user.getDevicePin(),
+                        user.getNameOnDevice(),
+                        user.getCardNumber(),
+                        user.getPrivilege(),
+                        user.getPassword(),
+                        device.getIpAddress(),
+                        device.getPort()
+                );
             } catch (Exception ex) {
                 log.warn("Could not dispatch user {} to {}: {}", user.getDevicePin(), device.getIpAddress(), ex.getMessage());
             }
@@ -641,6 +1104,38 @@ public class DeviceService {
     }
 
     private DeviceUserDto toDeviceUserDto(AttendanceDeviceUser u) {
+        int historyCount = cardHistoryRepository.findByDevicePinOrderByCreatedAtDesc(u.getDevicePin()).size();
+        return toDeviceUserDto(u, historyCount);
+    }
+
+    private DeviceUserDto toDeviceUserDto(AttendanceDeviceUser u, int historyCount) {
+        String deptName = u.getEmployee() != null && u.getEmployee().getDepartment() != null
+                ? u.getEmployee().getDepartment().getName() : null;
+        String posTitle = u.getEmployee() != null && u.getEmployee().getPosition() != null
+                ? u.getEmployee().getPosition().getTitle() : null;
+        String grade = u.getStudent() != null ? u.getStudent().getGrade() : null;
+        String className = u.getStudent() != null ? u.getStudent().getClassName() : null;
+
+        String pType = "USER";
+        if (u.getStudent() != null) {
+            pType = "STUDENT";
+        } else if (u.getEmployee() != null) {
+            if ((u.getEmployee().getDepartment() != null && "Academic Affairs".equalsIgnoreCase(u.getEmployee().getDepartment().getName()))
+                    || (u.getEmployee().getPosition() != null && "Lecturer / Instructor".equalsIgnoreCase(u.getEmployee().getPosition().getTitle()))) {
+                pType = "TEACHER";
+            } else {
+                pType = "STAFF";
+            }
+        }
+
+        String status = u.getStatus() != null ? u.getStatus() : "ACTIVE";
+        if (u.getStudent() != null && "WITHDRAWN".equalsIgnoreCase(u.getStudent().getStatus())) {
+            status = "INACTIVE";
+        } else if (u.getEmployee() != null && ("TERMINATED".equalsIgnoreCase(u.getEmployee().getEmploymentStatus())
+                || "RESIGNED".equalsIgnoreCase(u.getEmployee().getEmploymentStatus()))) {
+            status = "INACTIVE";
+        }
+
         return DeviceUserDto.builder()
                 .id(u.getId())
                 .deviceId(u.getDevice().getId())
@@ -653,12 +1148,19 @@ public class DeviceService {
                 .studentId(u.getStudent() != null ? u.getStudent().getId() : null)
                 .studentCode(u.getStudent() != null ? u.getStudent().getStudentCode() : null)
                 .studentName(u.getStudent() != null ? u.getStudent().getEnglishName() : null)
+                .studentGrade(grade)
+                .studentClassName(className)
+                .departmentName(deptName)
+                .positionTitle(posTitle)
+                .personnelType(pType)
                 .nameOnDevice(u.getNameOnDevice())
                 .privilege(u.getPrivilege())
                 .cardNumber(u.getCardNumber())
+                .cardHistoryCount(historyCount)
                 .faceEnrolled(u.isFaceEnrolled())
                 .fingerprintCount(u.getFingerprintCount())
                 .syncStatus(u.getSyncStatus())
+                .status(status)
                 .lastSyncedAt(u.getLastSyncedAt())
                 .build();
     }

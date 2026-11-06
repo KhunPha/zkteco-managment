@@ -41,8 +41,8 @@ export default function AppLayout({ children }) {
       <Sidebar />
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
         <Header />
-        <main className="flex-1 overflow-y-auto p-6 md:p-8">
-          <div className="max-w-7xl mx-auto space-y-6">
+        <main className="flex-1 overflow-y-auto p-3 sm:p-5 md:p-8">
+          <div className="max-w-7xl mx-auto space-y-5 sm:space-y-6">
             {children}
           </div>
         </main>

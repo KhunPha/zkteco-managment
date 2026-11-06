@@ -23,10 +23,17 @@ public class AttendanceRecordDto {
     private Long studentId;
     private String studentCode;
     private String studentName;
+    private String studentGrade;
+    private String studentClassName;
+    private String personnelType; // EMPLOYEE, TEACHER, STUDENT
     private Long shiftId;
     private String shiftName;
-    private Instant firstCheckIn;
-    private Instant lastCheckOut;
+    private Instant firstCheckIn; // Shift 1 First Check-In
+    private Instant shift1CheckIn; // Alias for firstCheckIn
+    private Instant shift1CheckOut; // Shift 1 Last Check-Out (Lunch Out)
+    private Instant shift2CheckIn; // Shift 2 First Check-In (Lunch In)
+    private Instant lastCheckOut; // Shift 2 Last Check-Out (Evening Out)
+    private Instant shift2CheckOut; // Alias for lastCheckOut
     private String inDeviceName;
     private String outDeviceName;
     private int totalWorkMinutes;

@@ -3,6 +3,10 @@ import { create } from "zustand";
 export const useThemeStore = create((set) => ({
   darkMode: typeof window !== "undefined" ? localStorage.getItem("theme_mode") === "dark" : false,
   language: typeof window !== "undefined" ? localStorage.getItem("app_lang") || "en" : "en",
+  mobileSidebarOpen: false,
+
+  setMobileSidebarOpen: (open) => set({ mobileSidebarOpen: open }),
+  toggleMobileSidebar: () => set((state) => ({ mobileSidebarOpen: !state.mobileSidebarOpen })),
 
   toggleDarkMode: () => {
     set((state) => {

@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import api from "@/lib/api";
 import { formatDate } from "@/lib/utils";
+import Portal from "@/components/common/Portal";
 
 export default function SchedulesPage() {
   const queryClient = useQueryClient();
@@ -30,6 +31,8 @@ export default function SchedulesPage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [shiftFilter, setShiftFilter] = useState("");
   const [deptFilter, setDeptFilter] = useState("");
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(25);
   const [actionFeedback, setActionFeedback] = useState(null);
 
   // Form State
@@ -283,6 +286,12 @@ export default function SchedulesPage() {
     });
   }, [schedules, searchTerm, shiftFilter, deptFilter]);
 
+  const totalPages = Math.ceil(filteredSchedules.length / pageSize) || 1;
+  const paginatedSchedules = useMemo(() => {
+    const start = page * pageSize;
+    return filteredSchedules.slice(start, start + pageSize);
+  }, [filteredSchedules, page, pageSize]);
+
   const days = [
     { key: "monday", label: "Mon" },
     { key: "tuesday", label: "Tue" },
@@ -425,7 +434,7 @@ export default function SchedulesPage() {
                   </td>
                 </tr>
               ) : (
-                filteredSchedules.map((sc) => (
+                paginatedSchedules.map((sc) => (
                   <tr key={sc.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-colors">
                     <td className="py-3 px-4">
                       <span className="font-bold text-slate-900 dark:text-white block">{sc.employeeName}</span>
@@ -483,13 +492,59 @@ export default function SchedulesPage() {
             </tbody>
           </table>
         </div>
+
+        {/* Pagination */}
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-3 p-4 border-t border-slate-100 dark:border-slate-800 text-xs">
+          <div className="text-slate-500 dark:text-slate-400">
+            Showing <span className="font-semibold text-slate-800 dark:text-slate-200">{filteredSchedules.length > 0 ? page * pageSize + 1 : 0}</span> to{" "}
+            <span className="font-semibold text-slate-800 dark:text-slate-200">
+              {Math.min((page + 1) * pageSize, filteredSchedules.length)}
+            </span>{" "}
+            of <span className="font-semibold text-slate-800 dark:text-slate-200">{filteredSchedules.length}</span> assigned schedules
+          </div>
+
+          <div className="flex items-center gap-2">
+            <select
+              value={pageSize}
+              onChange={(e) => {
+                setPageSize(Number(e.target.value));
+                setPage(0);
+              }}
+              className="px-2.5 py-1.5 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs text-slate-700 dark:text-slate-300 focus:outline-none"
+            >
+              <option value={15}>15 / page</option>
+              <option value={25}>25 / page</option>
+              <option value={50}>50 / page</option>
+              <option value={100}>100 / page</option>
+            </select>
+
+            <button
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+              disabled={page === 0}
+              className="px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-40 transition-colors font-medium"
+            >
+              Previous
+            </button>
+            <span className="px-2 font-medium text-slate-600 dark:text-slate-400">
+              Page {page + 1} of {totalPages}
+            </span>
+            <button
+              onClick={() => setPage((p) => (p + 1 < totalPages ? p + 1 : p))}
+              disabled={page + 1 >= totalPages}
+              className="px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-40 transition-colors font-medium"
+            >
+              Next
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* Modal: Assign Schedule (Single / Multi / Group) */}
       {showModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs overflow-y-auto">
-          <div className="w-full max-w-2xl bg-white dark:bg-slate-900 rounded-3xl p-6 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-5 my-8">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
+        <Portal>
+          <div className="fixed inset-0 z-[9999] overflow-y-auto flex items-center justify-center p-3 sm:p-4 bg-slate-950/75 backdrop-blur-md animate-in fade-in duration-200">
+            <div className="w-full max-w-2xl my-auto max-h-[85vh] flex flex-col bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200/80 dark:border-slate-800 overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-800 shrink-0">
               <div>
                 <h3 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
                   <CalendarRange className="text-indigo-600" size={18} />
@@ -505,7 +560,8 @@ export default function SchedulesPage() {
               </button>
             </div>
 
-            <form onSubmit={handleSubmit} className="space-y-4 text-xs">
+            <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0 overflow-hidden">
+              <div className="flex-1 min-h-0 overflow-y-auto p-6 space-y-4 text-xs">
               {/* Target Mode Tabs */}
               <div>
                 <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1.5">
@@ -810,20 +866,21 @@ export default function SchedulesPage() {
                   ))}
                 </div>
               </div>
+              </div>
 
-              {/* Form Footer */}
-              <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex justify-end gap-2.5">
+              {/* Form Footer - Pinned & Never Cut Off */}
+              <div className="px-6 py-3.5 bg-slate-50/80 dark:bg-slate-800/50 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end gap-2.5 shrink-0">
                 <button
                   type="button"
                   onClick={() => setShowModal(false)}
-                  className="px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 font-semibold hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                  className="px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 font-semibold text-xs hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={batchCreateMutation.isPending}
-                  className="px-5 py-2.5 rounded-xl bg-indigo-600 text-white font-semibold hover:bg-indigo-500 shadow-md shadow-indigo-600/20 transition-all flex items-center gap-1.5"
+                  className="px-5 py-2.5 rounded-xl bg-indigo-600 text-white font-semibold text-xs hover:bg-indigo-500 shadow-md shadow-indigo-600/20 transition-all flex items-center gap-1.5 disabled:opacity-50"
                 >
                   {batchCreateMutation.isPending && <RefreshCw size={14} className="animate-spin" />}
                   <span>
@@ -834,6 +891,7 @@ export default function SchedulesPage() {
             </form>
           </div>
         </div>
+        </Portal>
       )}
     </div>
   );

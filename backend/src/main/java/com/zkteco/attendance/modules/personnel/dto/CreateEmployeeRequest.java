@@ -10,7 +10,6 @@ import java.time.LocalDate;
 public class CreateEmployeeRequest {
     private Long userId;
 
-    @NotBlank(message = "Employee code is required")
     private String employeeCode;
 
     private String khmerName;
@@ -39,5 +38,6 @@ public class CreateEmployeeRequest {
     private String employmentStatus; // ACTIVE, PROBATION, SUSPENDED, TERMINATED, RESIGNED
     private String profileImageUrl;
     private Long supervisorId;
+    private String cardNumber;
 }
 

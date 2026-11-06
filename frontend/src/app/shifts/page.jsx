@@ -2,8 +2,9 @@
 
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Clock, Plus, Trash2, Edit2, RefreshCw, CheckCircle2 } from "lucide-react";
+import { Clock, Plus, Trash2, Edit2, RefreshCw, CheckCircle2, Coffee, Sparkles, ArrowRight, Info } from "lucide-react";
 import api from "@/lib/api";
+import Portal from "@/components/common/Portal";
 
 export default function ShiftsPage() {
   const queryClient = useQueryClient();
@@ -93,15 +94,15 @@ export default function ShiftsPage() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 animate-fade-in">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">
-            Work Shifts & Hours Configuration
+          <h1 className="text-2xl font-extrabold tracking-tight text-slate-900 dark:text-white flex items-center gap-2.5">
+            <span>Work Shifts & Hours Configuration</span>
           </h1>
-          <p className="text-xs text-slate-500 dark:text-slate-400">
-            Define daily operating hours, grace periods, and break rules
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+            Define daily operating hours, grace periods, and 2-shift break rules (Shift 1 + Lunch Break + Shift 2)
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -118,11 +119,65 @@ export default function ShiftsPage() {
               setFormData(initialForm);
               setShowModal(true);
             }}
-            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs shadow-md shadow-indigo-600/20 transition-all"
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-600 text-white font-bold text-xs shadow-md shadow-indigo-600/20 hover-lift active:scale-95 transition-all"
           >
             <Plus size={16} />
             <span>Add Work Shift</span>
           </button>
+        </div>
+      </div>
+
+      {/* 2-Shift & Scheduled Break Time Guidance Banner */}
+      <div className="p-5 rounded-3xl bg-gradient-to-br from-indigo-50/70 via-white to-amber-50/50 dark:from-slate-900 dark:via-slate-800/80 dark:to-slate-900 border border-indigo-100 dark:border-slate-800 space-y-3.5 shadow-xs">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-200/60 dark:border-slate-700/60 pb-3">
+          <div className="flex items-center gap-2">
+            <Coffee size={18} className="text-amber-500 shrink-0" />
+            <h2 className="text-sm font-bold text-slate-900 dark:text-white">
+              Understanding 2-Shift Workdays (Shift 1 + Break Time + Shift 2)
+            </h2>
+          </div>
+          <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60 px-2.5 py-1 rounded-full border border-emerald-200 dark:border-emerald-800 self-start sm:self-auto">
+            ✓ Break Duration is Excluded from Working Hours
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div className="p-3.5 rounded-2xl bg-white dark:bg-slate-900/80 border border-slate-200/80 dark:border-slate-700/80 space-y-1">
+            <span className="text-[10px] font-bold text-amber-600 dark:text-amber-400 uppercase tracking-wider block">
+              1. Shift 1 (Morning)
+            </span>
+            <span className="font-mono font-bold text-xs text-slate-900 dark:text-white block">
+              Start Work → Lunch Start
+            </span>
+            <span className="text-[11px] text-slate-500 dark:text-slate-400 block leading-relaxed">
+              Personnel punch Check-In (F1) in the morning. Covers the morning work block (typically 4.0h).
+            </span>
+          </div>
+
+          <div className="p-3.5 rounded-2xl bg-emerald-50/50 dark:bg-emerald-950/30 border border-emerald-200/60 dark:border-emerald-800/60 space-y-1">
+            <span className="text-[10px] font-bold text-emerald-700 dark:text-emerald-300 uppercase tracking-wider block flex items-center gap-1">
+              <Coffee size={12} />
+              2. Scheduled Break (Lunch)
+            </span>
+            <span className="font-mono font-bold text-xs text-emerald-950 dark:text-emerald-200 block">
+              Break Start → Break End
+            </span>
+            <span className="text-[11px] text-emerald-800/80 dark:text-emerald-300/80 block leading-relaxed">
+              Rest period (1.0h to 1.5h). Automatically deducted so no one is penalized as late or early leave during lunch.
+            </span>
+          </div>
+
+          <div className="p-3.5 rounded-2xl bg-white dark:bg-slate-900/80 border border-slate-200/80 dark:border-slate-700/80 space-y-1">
+            <span className="text-[10px] font-bold text-indigo-600 dark:text-indigo-400 uppercase tracking-wider block">
+              3. Shift 2 (Afternoon)
+            </span>
+            <span className="font-mono font-bold text-xs text-slate-900 dark:text-white block">
+              Lunch End → Day Checkout
+            </span>
+            <span className="text-[11px] text-slate-500 dark:text-slate-400 block leading-relaxed">
+              Personnel resume work after lunch and punch Check-Out (F4) in the evening (typically 4.0h).
+            </span>
+          </div>
         </div>
       </div>
 
@@ -139,7 +194,7 @@ export default function ShiftsPage() {
           shifts?.map((s) => (
             <div
               key={s.id}
-              className="p-5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4 hover:border-indigo-200 dark:hover:border-indigo-900 transition-colors"
+              className="p-5 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800/80 shadow-xs space-y-4 hover:border-indigo-300 dark:hover:border-indigo-700/60 hover-lift transition-all"
             >
               <div className="flex items-start justify-between">
                 <div>
@@ -151,14 +206,14 @@ export default function ShiftsPage() {
                 <div className="flex items-center gap-1">
                   <button
                     onClick={() => openEditModal(s)}
-                    className="p-1.5 text-slate-400 hover:text-indigo-600 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                    className="p-1.5 text-slate-400 hover:text-indigo-600 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                     title="Edit Shift"
                   >
                     <Edit2 size={15} />
                   </button>
                   <button
                     onClick={() => deleteShift(s.id)}
-                    className="p-1.5 text-slate-400 hover:text-rose-500 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                    className="p-1.5 text-slate-400 hover:text-rose-500 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                     title="Delete Shift"
                   >
                     <Trash2 size={15} />
@@ -166,9 +221,38 @@ export default function ShiftsPage() {
                 </div>
               </div>
 
+              {/* 2-Shift Visual Indicator */}
+              {s.breakStart && s.breakEnd ? (
+                <div className="p-3 rounded-2xl bg-indigo-50/40 dark:bg-indigo-950/20 border border-indigo-100 dark:border-indigo-900/50 space-y-1.5 text-[11px]">
+                  <span className="text-[10px] font-bold text-indigo-700 dark:text-indigo-300 uppercase tracking-wider flex items-center gap-1">
+                    <Coffee size={12} className="text-amber-500" />
+                    2-Shift Working Model Active
+                  </span>
+                  <div className="grid grid-cols-3 gap-1.5 text-center font-mono">
+                    <div className="p-1.5 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+                      <span className="text-[9px] text-slate-400 block">Shift 1</span>
+                      <span className="font-bold text-slate-900 dark:text-white block truncate">{s.startTime.substring(0, 5)}</span>
+                    </div>
+                    <div className="p-1.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300">
+                      <span className="text-[9px] block">Lunch</span>
+                      <span className="font-bold block truncate">{s.breakStart.substring(0, 5)}</span>
+                    </div>
+                    <div className="p-1.5 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+                      <span className="text-[9px] text-slate-400 block">Shift 2</span>
+                      <span className="font-bold text-slate-900 dark:text-white block truncate">{s.endTime.substring(0, 5)}</span>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
+                  <Clock size={13} className="text-blue-500 shrink-0" />
+                  <span>Continuous Single Shift (No Break Deduction)</span>
+                </div>
+              )}
+
               <div className="space-y-2 text-xs border-y border-slate-100 dark:border-slate-800/80 py-3">
                 <div className="flex justify-between font-mono">
-                  <span className="text-slate-500">Working Hours:</span>
+                  <span className="text-slate-500">Working Span:</span>
                   <span className="font-bold text-slate-900 dark:text-white">
                     {s.startTime} → {s.endTime}
                   </span>
@@ -178,11 +262,11 @@ export default function ShiftsPage() {
                   <span
                     className={
                       s.breakStart
-                        ? "font-mono text-slate-700 dark:text-slate-300"
-                        : "font-semibold text-emerald-600 dark:text-emerald-400"
+                        ? "font-mono font-bold text-emerald-600 dark:text-emerald-400"
+                        : "font-semibold text-slate-500 dark:text-slate-400"
                     }
                   >
-                    {s.breakStart ? `${s.breakStart} → ${s.breakEnd}` : "Full Hours (No Break)"}
+                    {s.breakStart ? `${s.breakStart} → ${s.breakEnd}` : "Continuous (No Break)"}
                   </span>
                 </div>
                 <div className="flex justify-between">
@@ -191,7 +275,7 @@ export default function ShiftsPage() {
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-500">Daily Target:</span>
-                  <span className="font-bold text-slate-900 dark:text-white">{s.workHours} Hours Full</span>
+                  <span className="font-bold text-slate-900 dark:text-white">{s.workHours} Hours Net Work</span>
                 </div>
               </div>
 
@@ -199,9 +283,14 @@ export default function ShiftsPage() {
                 <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 dark:bg-emerald-950/40 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800 flex items-center gap-1">
                   <CheckCircle2 size={11} /> Active
                 </span>
+                {s.breakStart && (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
+                    2-Shift (Shift 1 / 2)
+                  </span>
+                )}
                 {!s.breakStart && (
                   <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
-                    8h Full / No Break
+                    Continuous
                   </span>
                 )}
                 {s.overnight && (
@@ -217,9 +306,10 @@ export default function ShiftsPage() {
 
       {/* Modal: Add / Edit Shift */}
       {showModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
-          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl p-6 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
+        <Portal>
+          <div className="fixed inset-0 z-[9999] overflow-y-auto flex items-center justify-center p-3 sm:p-4 bg-slate-950/75 backdrop-blur-md animate-in fade-in duration-200">
+            <div className="w-full max-w-lg my-auto max-h-[85vh] flex flex-col bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200/80 dark:border-slate-800 overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-800 shrink-0">
               <h3 className="text-base font-bold text-slate-900 dark:text-white">
                 {editingShiftId ? "Edit Work Shift" : "Create Work Shift"}
               </h3>
@@ -228,7 +318,7 @@ export default function ShiftsPage() {
                   setShowModal(false);
                   setEditingShiftId(null);
                 }}
-                className="text-slate-400 hover:text-slate-600 text-lg"
+                className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-lg"
               >
                 ✕
               </button>
@@ -239,8 +329,61 @@ export default function ShiftsPage() {
                 e.preventDefault();
                 saveMutation.mutate(formData);
               }}
-              className="space-y-3.5 text-xs"
+              className="flex flex-col flex-1 min-h-0 overflow-hidden"
             >
+              <div className="flex-1 min-h-0 overflow-y-auto p-6 space-y-4 text-xs">
+                {/* Quick 1-Click 2-Shift Templates */}
+                {!editingShiftId && (
+                  <div className="p-3.5 rounded-2xl bg-indigo-50/50 dark:bg-indigo-950/30 border border-indigo-100 dark:border-indigo-900/50 space-y-2">
+                    <span className="text-[11px] font-bold text-indigo-900 dark:text-indigo-300 flex items-center gap-1.5">
+                      <Sparkles size={14} className="text-indigo-600 dark:text-indigo-400" />
+                      1-Click 2-Shift Presets:
+                    </span>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-left">
+                      <button
+                        type="button"
+                        onClick={() => setFormData({
+                          ...formData,
+                          name: "Standard Office 2-Shift (with Lunch Break)",
+                          code: formData.code || "SHIFT_OFFICE_2S",
+                          startTime: "08:00:00",
+                          endTime: "17:30:00",
+                          hasBreak: true,
+                          breakStart: "12:00:00",
+                          breakEnd: "13:30:00",
+                          workHours: 8.0,
+                          graceLateMinutes: 15,
+                          graceEarlyLeaveMinutes: 15,
+                        })}
+                        className="p-2.5 rounded-xl border border-indigo-200 dark:border-indigo-800 bg-white dark:bg-slate-800 hover:bg-indigo-50 dark:hover:bg-slate-700/60 transition-colors text-left"
+                      >
+                        <span className="font-bold text-xs text-indigo-700 dark:text-indigo-300 block">Office 2-Shift</span>
+                        <span className="text-[10px] text-slate-500 dark:text-slate-400 font-mono">08:00–17:30 (12:00–13:30 break)</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setFormData({
+                          ...formData,
+                          name: "Academic School 2-Shift (Faculty)",
+                          code: formData.code || "SHIFT_ACADEMIC_2S",
+                          startTime: "07:30:00",
+                          endTime: "16:30:00",
+                          hasBreak: true,
+                          breakStart: "11:30:00",
+                          breakEnd: "13:00:00",
+                          workHours: 7.5,
+                          graceLateMinutes: 15,
+                          graceEarlyLeaveMinutes: 15,
+                        })}
+                        className="p-2.5 rounded-xl border border-amber-200 dark:border-amber-800 bg-white dark:bg-slate-800 hover:bg-amber-50 dark:hover:bg-slate-700/60 transition-colors text-left"
+                      >
+                        <span className="font-bold text-xs text-amber-700 dark:text-amber-300 block">School 2-Shift</span>
+                        <span className="text-[10px] text-slate-500 dark:text-slate-400 font-mono">07:30–16:30 (11:30–13:00 break)</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">
@@ -395,22 +538,24 @@ export default function ShiftsPage() {
                   Overnight Shift (Past midnight)
                 </label>
               </div>
+              </div>
 
-              <div className="pt-3 flex justify-end gap-2">
+              {/* Pinned Sticky Footer - Never Cut Off */}
+              <div className="px-6 py-3.5 bg-slate-50/80 dark:bg-slate-800/50 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end gap-2.5 shrink-0">
                 <button
                   type="button"
                   onClick={() => {
                     setShowModal(false);
                     setEditingShiftId(null);
                   }}
-                  className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 font-semibold"
+                  className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 font-semibold text-xs hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={saveMutation.isPending}
-                  className="px-4 py-2 rounded-xl bg-indigo-600 text-white font-semibold hover:bg-indigo-500 shadow-md transition-colors"
+                  className="px-4 py-2 rounded-xl bg-indigo-600 text-white font-semibold text-xs hover:bg-indigo-500 shadow-md transition-colors disabled:opacity-50"
                 >
                   {saveMutation.isPending ? "Saving..." : editingShiftId ? "Update Shift" : "Save Shift"}
                 </button>
@@ -418,6 +563,7 @@ export default function ShiftsPage() {
             </form>
           </div>
         </div>
+        </Portal>
       )}
     </div>
   );

@@ -18,11 +18,14 @@ import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import lombok.extern.slf4j.Slf4j;
+
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class EmployeeService {
@@ -32,6 +35,13 @@ public class EmployeeService {
     private final DepartmentRepository departmentRepository;
     private final PositionRepository positionRepository;
     private final BranchRepository branchRepository;
+    private final com.zkteco.attendance.modules.device.TerminalSyncService terminalSyncService;
+    private final PersonnelCodeGeneratorService personnelCodeGeneratorService;
+
+    @Transactional(readOnly = true)
+    public String getNextEmployeeCode() {
+        return personnelCodeGeneratorService.generateNextUniqueCode();
+    }
 
     @Transactional(readOnly = true)
     public PageResponse<EmployeeDto> getEmployees(String search, Long departmentId, Long branchId, String status, Pageable pageable) {
@@ -80,12 +90,18 @@ public class EmployeeService {
 
     @Transactional
     public EmployeeDto createEmployee(CreateEmployeeRequest request) {
-        if (employeeRepository.existsByEmployeeCodeAndDeletedAtIsNull(request.getEmployeeCode())) {
-            throw new AppException(ErrorCode.DUPLICATE_RESOURCE, "Employee code already exists: " + request.getEmployeeCode());
+        String empCode = request.getEmployeeCode();
+        if (empCode == null || empCode.trim().isEmpty()) {
+            empCode = personnelCodeGeneratorService.generateNextUniqueCode();
+        } else {
+            empCode = empCode.trim().toUpperCase();
+            if (employeeRepository.existsByEmployeeCodeAndDeletedAtIsNull(empCode)) {
+                throw new AppException(ErrorCode.DUPLICATE_RESOURCE, "Employee code already exists: " + empCode);
+            }
         }
 
         Employee emp = Employee.builder()
-                .employeeCode(request.getEmployeeCode().trim().toUpperCase())
+                .employeeCode(empCode)
                 .khmerName(request.getKhmerName())
                 .englishName(request.getEnglishName().trim())
                 .gender(request.getGender().toUpperCase())
@@ -116,7 +132,13 @@ public class EmployeeService {
             employeeRepository.findById(request.getSupervisorId()).ifPresent(emp::setSupervisor);
         }
 
-        return toDto(employeeRepository.save(emp));
+        Employee saved = employeeRepository.save(emp);
+        try {
+            terminalSyncService.syncEmployee(saved, request.getCardNumber());
+        } catch (Exception ex) {
+            log.warn("Terminal sync hook failed for employee {}: {}", saved.getEmployeeCode(), ex.getMessage());
+        }
+        return toDto(saved);
     }
 
     @Transactional
@@ -164,7 +186,29 @@ public class EmployeeService {
             emp.setSupervisor(employeeRepository.findById(request.getSupervisorId()).orElse(null));
         }
 
-        return toDto(employeeRepository.save(emp));
+        Employee saved = employeeRepository.save(emp);
+        try {
+            terminalSyncService.syncEmployee(saved, request.getCardNumber());
+        } catch (Exception ex) {
+            log.warn("Terminal sync hook failed for employee {}: {}", saved.getEmployeeCode(), ex.getMessage());
+        }
+        return toDto(saved);
+    }
+
+    @Transactional
+    public EmployeeDto updateEmployeeStatus(Long id, String status) {
+        Employee emp = employeeRepository.findById(id)
+                .filter(e -> e.getDeletedAt() == null)
+                .orElseThrow(() -> new ResourceNotFoundException("Employee", "id", id));
+
+        emp.setEmploymentStatus(status.toUpperCase().trim());
+        Employee saved = employeeRepository.save(emp);
+        try {
+            terminalSyncService.syncEmployee(saved, null);
+        } catch (Exception ex) {
+            log.warn("Terminal sync hook failed: {}", ex.getMessage());
+        }
+        return toDto(saved);
     }
 
     @Transactional
@@ -176,6 +220,11 @@ public class EmployeeService {
         emp.setDeletedAt(Instant.now());
         emp.setEmploymentStatus("TERMINATED");
         employeeRepository.save(emp);
+        try {
+            terminalSyncService.deleteUserFromPhysicalMachinesAsync(emp.getEmployeeCode());
+        } catch (Exception ex) {
+            log.warn("Terminal delete failed: {}", ex.getMessage());
+        }
     }
 
     public EmployeeDto toDto(Employee emp) {

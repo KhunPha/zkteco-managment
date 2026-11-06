@@ -18,6 +18,7 @@ public class CreateDeviceUserRequest {
     private String privilege; // NORMAL_USER, ADMIN, ENROLLER, SUPER_ADMIN
     private String cardNumber;
     private String password;
+    private String status; // ACTIVE, INACTIVE
     private Boolean faceEnrolled;
     private Integer fingerprintCount;
 }

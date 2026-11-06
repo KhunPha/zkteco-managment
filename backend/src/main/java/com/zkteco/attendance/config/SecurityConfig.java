@@ -41,6 +41,7 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers(
                                 "/api/v1/auth/**",
+                                "/uploads/**",
                                 "/iclock/**",
                                 "/api/v1/mis/webhook/**",
                                 "/api-docs/**",

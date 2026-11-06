@@ -1,9 +1,9 @@
 package com.zkteco.attendance.modules.device;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.zkteco.attendance.common.ApiResponse;
 import com.zkteco.attendance.common.PageResponse;
-import com.zkteco.attendance.modules.device.dto.CreateDeviceRequest;
-import com.zkteco.attendance.modules.device.dto.DeviceDto;
+import com.zkteco.attendance.modules.device.dto.*;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -14,6 +14,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
 
 @RestController
 @RequestMapping("/api/v1/devices")
@@ -74,12 +76,38 @@ public class DeviceController {
         return ResponseEntity.ok(ApiResponse.ok(msg, connected));
     }
 
+    @GetMapping("/{id}/live-status")
+    @PreAuthorize("hasAuthority('device.read') or hasRole('SUPER_ADMIN') or hasRole('ADMIN')")
+    @Operation(summary = "Query live hardware telemetry, machine clock, drift, and diagnostics")
+    public ResponseEntity<ApiResponse<DeviceLiveStatusDto>> getDeviceLiveStatus(@PathVariable Long id) {
+        DeviceLiveStatusDto status = deviceService.getDeviceLiveStatus(id);
+        return ResponseEntity.ok(ApiResponse.ok("Live status retrieved", status));
+    }
+
     @PostMapping("/{id}/sync-time")
     @PreAuthorize("hasAuthority('device.sync') or hasRole('SUPER_ADMIN') or hasRole('ADMIN')")
-    @Operation(summary = "Synchronize device clock with server time")
-    public ResponseEntity<ApiResponse<Boolean>> syncTime(@PathVariable Long id) {
-        boolean synced = deviceService.syncTime(id);
-        return ResponseEntity.ok(ApiResponse.ok("Time synchronization command sent", synced));
+    @Operation(summary = "Synchronize device clock with server/computer time")
+    public ResponseEntity<ApiResponse<DeviceControlResponseDto>> syncTime(@PathVariable Long id) {
+        DeviceControlResponseDto result = deviceService.syncTime(id);
+        return ResponseEntity.ok(ApiResponse.ok(result.getMessage(), result));
+    }
+
+    @PostMapping("/sync-all-time")
+    @PreAuthorize("hasAuthority('device.sync') or hasRole('SUPER_ADMIN') or hasRole('ADMIN')")
+    @Operation(summary = "Synchronize hardware clocks across all registered terminals simultaneously")
+    public ResponseEntity<ApiResponse<List<DeviceControlResponseDto>>> syncAllDevicesTime() {
+        List<DeviceControlResponseDto> results = deviceService.syncAllDevicesTime();
+        return ResponseEntity.ok(ApiResponse.ok("Synchronized clocks across active terminals", results));
+    }
+
+    @PostMapping("/{id}/control")
+    @PreAuthorize("hasAuthority('device.restart') or hasRole('SUPER_ADMIN') or hasRole('ADMIN')")
+    @Operation(summary = "Send hardware command: SYNC_TIME, TEST_VOICE, RESTART, POWER_OFF, DISABLE, ENABLE, CLEAR_LOGS")
+    public ResponseEntity<ApiResponse<DeviceControlResponseDto>> controlDevice(
+            @PathVariable Long id,
+            @Valid @RequestBody DeviceControlRequest request) {
+        DeviceControlResponseDto result = deviceService.controlDevice(id, request);
+        return ResponseEntity.ok(ApiResponse.ok(result.getMessage(), result));
     }
 
     @PostMapping("/{id}/pull-logs")
@@ -106,6 +134,24 @@ public class DeviceController {
             @RequestParam(required = false) Long sourceDeviceId) {
         int count = deviceService.syncUsersToDevice(id, sourceDeviceId);
         return ResponseEntity.ok(ApiResponse.ok("Successfully synced " + count + " users to device", count));
+    }
+
+    @GetMapping("/{id}/menu-parameters")
+    @PreAuthorize("hasAuthority('device.read') or hasRole('SUPER_ADMIN') or hasRole('ADMIN')")
+    @Operation(summary = "Query all hardware menu parameters from physical terminal")
+    public ResponseEntity<ApiResponse<JsonNode>> getMenuParameters(@PathVariable Long id) {
+        JsonNode params = deviceService.getDeviceMenuParameters(id);
+        return ResponseEntity.ok(ApiResponse.ok("Menu parameters retrieved from terminal", params));
+    }
+
+    @PostMapping("/{id}/menu-parameters")
+    @PreAuthorize("hasAuthority('device.update') or hasRole('SUPER_ADMIN') or hasRole('ADMIN')")
+    @Operation(summary = "Update hardware menu parameters on physical terminal")
+    public ResponseEntity<ApiResponse<JsonNode>> setMenuParameters(
+            @PathVariable Long id,
+            @RequestBody JsonNode params) {
+        JsonNode result = deviceService.setDeviceMenuParameters(id, params);
+        return ResponseEntity.ok(ApiResponse.ok("Menu parameters saved to terminal", result));
     }
 
     @PostMapping("/sync-all-users")

@@ -33,12 +33,14 @@ public class ReportController {
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate,
             @RequestParam(required = false) Long departmentId,
             @RequestParam(required = false) Long employeeId,
-            @RequestParam(required = false) String status) {
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String personnelType,
+            @RequestParam(required = false) String orderBy) {
 
         LocalDate start = (startDate != null) ? startDate : LocalDate.now().minusMonths(1);
         LocalDate end = (endDate != null) ? endDate : LocalDate.now();
 
-        return ResponseEntity.ok(ApiResponse.ok(reportService.getReportRecords(start, end, departmentId, employeeId, status)));
+        return ResponseEntity.ok(ApiResponse.ok(reportService.getReportRecords(start, end, departmentId, employeeId, status, personnelType, orderBy)));
     }
 
     @GetMapping("/export/excel")
@@ -50,12 +52,14 @@ public class ReportController {
             @RequestParam(required = false) Long departmentId,
             @RequestParam(required = false) Long employeeId,
             @RequestParam(required = false) String status,
+            @RequestParam(required = false) String personnelType,
+            @RequestParam(required = false) String orderBy,
             HttpServletResponse response) throws Exception {
 
         LocalDate start = (startDate != null) ? startDate : LocalDate.now().minusMonths(1);
         LocalDate end = (endDate != null) ? endDate : LocalDate.now();
 
-        List<AttendanceRecordDto> records = reportService.getReportRecords(start, end, departmentId, employeeId, status);
+        List<AttendanceRecordDto> records = reportService.getReportRecords(start, end, departmentId, employeeId, status, personnelType, orderBy);
 
         response.setContentType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
         response.setHeader(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"attendance-report-" + start + "-to-" + end + ".xlsx\"");
@@ -71,12 +75,14 @@ public class ReportController {
             @RequestParam(required = false) Long departmentId,
             @RequestParam(required = false) Long employeeId,
             @RequestParam(required = false) String status,
+            @RequestParam(required = false) String personnelType,
+            @RequestParam(required = false) String orderBy,
             HttpServletResponse response) throws Exception {
 
         LocalDate start = (startDate != null) ? startDate : LocalDate.now().minusMonths(1);
         LocalDate end = (endDate != null) ? endDate : LocalDate.now();
 
-        List<AttendanceRecordDto> records = reportService.getReportRecords(start, end, departmentId, employeeId, status);
+        List<AttendanceRecordDto> records = reportService.getReportRecords(start, end, departmentId, employeeId, status, personnelType, orderBy);
 
         response.setContentType("text/csv");
         response.setHeader(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"attendance-report-" + start + "-to-" + end + ".csv\"");
@@ -92,12 +98,14 @@ public class ReportController {
             @RequestParam(required = false) Long departmentId,
             @RequestParam(required = false) Long employeeId,
             @RequestParam(required = false) String status,
+            @RequestParam(required = false) String personnelType,
+            @RequestParam(required = false) String orderBy,
             HttpServletResponse response) throws Exception {
 
         LocalDate start = (startDate != null) ? startDate : LocalDate.now().minusMonths(1);
         LocalDate end = (endDate != null) ? endDate : LocalDate.now();
 
-        List<AttendanceRecordDto> records = reportService.getReportRecords(start, end, departmentId, employeeId, status);
+        List<AttendanceRecordDto> records = reportService.getReportRecords(start, end, departmentId, employeeId, status, personnelType, orderBy);
 
         response.setContentType(MediaType.APPLICATION_PDF_VALUE);
         response.setHeader(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"attendance-report-" + start + "-to-" + end + ".pdf\"");

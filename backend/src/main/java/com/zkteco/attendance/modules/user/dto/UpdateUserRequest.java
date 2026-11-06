@@ -15,6 +15,7 @@ public class UpdateUserRequest {
     private String phoneNumber;
     private Boolean active;
     private Boolean locked;
+    private String profileImageUrl;
     private Set<String> roles;
 }
 

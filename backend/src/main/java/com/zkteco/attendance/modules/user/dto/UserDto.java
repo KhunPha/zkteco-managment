@@ -23,6 +23,7 @@ public class UserDto {
     private boolean active;
     private boolean locked;
     private Instant lastLoginAt;
+    private String profileImageUrl;
     private Set<String> roles;
     private Set<String> permissions;
 }

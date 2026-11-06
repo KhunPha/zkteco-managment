@@ -5,6 +5,8 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ShieldCheck, Plus, Trash2, Search, RefreshCw, Key } from "lucide-react";
 import api from "@/lib/api";
 import { formatDate, formatTime } from "@/lib/utils";
+import ImageUploadDropzone from "@/components/common/ImageUploadDropzone";
+import Portal from "@/components/common/Portal";
 
 export default function UsersPage() {
   const queryClient = useQueryClient();
@@ -17,6 +19,7 @@ export default function UsersPage() {
     password: "",
     firstName: "",
     lastName: "",
+    profileImageUrl: "",
     roles: ["ADMIN"],
   });
 
@@ -50,6 +53,7 @@ export default function UsersPage() {
         password: "",
         firstName: "",
         lastName: "",
+        profileImageUrl: "",
         roles: ["ADMIN"],
       });
     },
@@ -139,8 +143,12 @@ export default function UsersPage() {
                   <tr key={u.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-colors">
                     <td className="py-3 px-4">
                       <div className="flex items-center gap-2.5">
-                        <div className="w-7 h-7 rounded-full bg-slate-200 dark:bg-slate-700 font-bold text-xs flex items-center justify-center shrink-0">
-                          {u.username[0].toUpperCase()}
+                        <div className="w-8 h-8 rounded-full bg-slate-200 dark:bg-slate-700 font-bold text-xs flex items-center justify-center shrink-0 overflow-hidden border border-slate-200 dark:border-slate-700">
+                          {u.profileImageUrl ? (
+                            <img src={u.profileImageUrl} alt={u.username} className="w-full h-full object-cover" />
+                          ) : (
+                            u.username ? u.username[0].toUpperCase() : "U"
+                          )}
                         </div>
                         <div>
                           <span className="font-bold text-slate-900 dark:text-white block">{u.username}</span>
@@ -193,11 +201,12 @@ export default function UsersPage() {
 
       {/* Modal: Create User */}
       {showModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs">
-          <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl p-6 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
+        <Portal>
+          <div className="fixed inset-0 z-[9999] overflow-y-auto flex items-center justify-center p-3 sm:p-4 bg-slate-950/75 backdrop-blur-md animate-in fade-in duration-200">
+            <div className="w-full max-w-md my-auto max-h-[85vh] flex flex-col bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200/80 dark:border-slate-800 overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-800 shrink-0">
               <h3 className="text-base font-bold text-slate-900 dark:text-white">Create User Account</h3>
-              <button onClick={() => setShowModal(false)} className="text-slate-400 hover:text-slate-600 text-lg">✕</button>
+              <button onClick={() => setShowModal(false)} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-lg">✕</button>
             </div>
 
             <form
@@ -205,90 +214,100 @@ export default function UsersPage() {
                 e.preventDefault();
                 createMutation.mutate(formData);
               }}
-              className="space-y-3.5 text-xs"
+              className="flex flex-col flex-1 min-h-0 overflow-hidden"
             >
-              <div>
-                <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Username *</label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. hr_manager"
-                  value={formData.username}
-                  onChange={(e) => setFormData({ ...formData, username: e.target.value })}
-                  className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono"
+              <div className="flex-1 min-h-0 overflow-y-auto p-6 space-y-3.5 text-xs">
+                <ImageUploadDropzone
+                  value={formData.profileImageUrl || ""}
+                  onChange={(url) => setFormData({ ...formData, profileImageUrl: url })}
+                  label="User Profile Avatar"
+                  helperText="Drag & drop user photo (PNG, JPG, WEBP)"
                 />
-              </div>
 
-              <div>
-                <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Email *</label>
-                <input
-                  type="email"
-                  required
-                  placeholder="hr@enterprise.edu.kh"
-                  value={formData.email}
-                  onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                  className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                />
-              </div>
-
-              <div>
-                <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Initial Password *</label>
-                <input
-                  type="password"
-                  required
-                  placeholder="••••••••••••"
-                  value={formData.password}
-                  onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                  className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">First Name</label>
+                  <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Username *</label>
                   <input
                     type="text"
-                    value={formData.firstName}
-                    onChange={(e) => setFormData({ ...formData, firstName: e.target.value })}
+                    required
+                    placeholder="e.g. hr_manager"
+                    value={formData.username}
+                    onChange={(e) => setFormData({ ...formData, username: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Email *</label>
+                  <input
+                    type="email"
+                    required
+                    placeholder="hr@enterprise.edu.kh"
+                    value={formData.email}
+                    onChange={(e) => setFormData({ ...formData, email: e.target.value })}
                     className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   />
                 </div>
+
                 <div>
-                  <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Last Name</label>
+                  <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Initial Password *</label>
                   <input
-                    type="text"
-                    value={formData.lastName}
-                    onChange={(e) => setFormData({ ...formData, lastName: e.target.value })}
+                    type="password"
+                    required
+                    placeholder="••••••••••••"
+                    value={formData.password}
+                    onChange={(e) => setFormData({ ...formData, password: e.target.value })}
                     className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   />
                 </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">First Name</label>
+                    <input
+                      type="text"
+                      value={formData.firstName}
+                      onChange={(e) => setFormData({ ...formData, firstName: e.target.value })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Last Name</label>
+                    <input
+                      type="text"
+                      value={formData.lastName}
+                      onChange={(e) => setFormData({ ...formData, lastName: e.target.value })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">System Role *</label>
+                  <select
+                    value={formData.roles[0]}
+                    onChange={(e) => setFormData({ ...formData, roles: [e.target.value] })}
+                    className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    {roles?.map((r) => (
+                      <option key={r.id} value={r.name}>{r.name} - {r.description}</option>
+                    ))}
+                  </select>
+                </div>
               </div>
 
-              <div>
-                <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">System Role *</label>
-                <select
-                  value={formData.roles[0]}
-                  onChange={(e) => setFormData({ ...formData, roles: [e.target.value] })}
-                  className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                >
-                  {roles?.map((r) => (
-                    <option key={r.id} value={r.name}>{r.name} - {r.description}</option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="pt-3 flex justify-end gap-2">
+              {/* Pinned Sticky Footer - Never Cut Off */}
+              <div className="px-6 py-3.5 bg-slate-50/80 dark:bg-slate-800/50 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end gap-2.5 shrink-0">
                 <button
                   type="button"
                   onClick={() => setShowModal(false)}
-                  className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 font-semibold"
+                  className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 font-semibold text-xs hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={createMutation.isPending}
-                  className="px-4 py-2 rounded-xl bg-indigo-600 text-white font-semibold hover:bg-indigo-500"
+                  className="px-4 py-2 rounded-xl bg-indigo-600 text-white font-semibold text-xs hover:bg-indigo-500 shadow-md shadow-indigo-600/20 disabled:opacity-50"
                 >
                   {createMutation.isPending ? "Creating..." : "Create Account"}
                 </button>
@@ -296,6 +315,7 @@ export default function UsersPage() {
             </form>
           </div>
         </div>
+        </Portal>
       )}
     </div>
   );

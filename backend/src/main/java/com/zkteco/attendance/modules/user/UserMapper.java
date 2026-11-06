@@ -35,6 +35,7 @@ public class UserMapper {
                 .lastName(user.getLastName())
                 .fullName(user.getFullName())
                 .phoneNumber(user.getPhoneNumber())
+                .profileImageUrl(user.getProfileImageUrl())
                 .active(user.isActive())
                 .locked(user.isLocked())
                 .lastLoginAt(user.getLastLoginAt())

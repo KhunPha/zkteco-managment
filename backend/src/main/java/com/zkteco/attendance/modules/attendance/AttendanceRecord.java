@@ -45,6 +45,12 @@ public class AttendanceRecord extends BaseEntity {
     @Column(name = "first_check_in")
     private Instant firstCheckIn;
 
+    @Column(name = "shift1_check_out")
+    private Instant shift1CheckOut;
+
+    @Column(name = "shift2_check_in")
+    private Instant shift2CheckIn;
+
     @Column(name = "last_check_out")
     private Instant lastCheckOut;
 

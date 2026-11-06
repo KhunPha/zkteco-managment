@@ -10,6 +10,7 @@ import java.util.Optional;
 @Repository
 public interface EmployeeRepository extends JpaRepository<Employee, Long>, JpaSpecificationExecutor<Employee> {
     Optional<Employee> findByEmployeeCodeAndDeletedAtIsNull(String employeeCode);
+    Optional<Employee> findFirstByEmployeeCodeOrderByIdDesc(String employeeCode);
     boolean existsByEmployeeCodeAndDeletedAtIsNull(String employeeCode);
     long countByEmploymentStatusAndDeletedAtIsNull(String employmentStatus);
     List<Employee> findByDeletedAtIsNull();

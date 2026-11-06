@@ -35,6 +35,13 @@ public class EmployeeController {
         return ResponseEntity.ok(ApiResponse.ok(employeeService.getEmployees(search, departmentId, branchId, status, pageable)));
     }
 
+    @GetMapping("/next-code")
+    @PreAuthorize("hasAuthority('employee.read') or hasRole('SUPER_ADMIN') or hasRole('ADMIN') or hasRole('HR_MANAGER')")
+    @Operation(summary = "Get next unique auto-generated employee/personnel code")
+    public ResponseEntity<ApiResponse<java.util.Map<String, String>>> getNextEmployeeCode() {
+        return ResponseEntity.ok(ApiResponse.ok(java.util.Map.of("nextCode", employeeService.getNextEmployeeCode())));
+    }
+
     @GetMapping("/{id}")
     @PreAuthorize("hasAuthority('employee.read') or hasRole('SUPER_ADMIN') or hasRole('ADMIN') or hasRole('HR_MANAGER')")
     @Operation(summary = "Get employee details by ID")
@@ -57,6 +64,15 @@ public class EmployeeController {
             @PathVariable Long id,
             @Valid @RequestBody CreateEmployeeRequest request) {
         return ResponseEntity.ok(ApiResponse.ok("Employee updated successfully", employeeService.updateEmployee(id, request)));
+    }
+
+    @PutMapping("/{id}/status")
+    @PreAuthorize("hasAuthority('employee.update') or hasRole('SUPER_ADMIN') or hasRole('ADMIN') or hasRole('HR_MANAGER')")
+    @Operation(summary = "Update employee active or inactive employment status")
+    public ResponseEntity<ApiResponse<EmployeeDto>> updateEmployeeStatus(
+            @PathVariable Long id,
+            @RequestParam String status) {
+        return ResponseEntity.ok(ApiResponse.ok("Employee status updated successfully", employeeService.updateEmployeeStatus(id, status)));
     }
 
     @DeleteMapping("/{id}")

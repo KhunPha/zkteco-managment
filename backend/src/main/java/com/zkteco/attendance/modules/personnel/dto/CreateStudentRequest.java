@@ -5,7 +5,6 @@ import lombok.Data;
 
 @Data
 public class CreateStudentRequest {
-    @NotBlank(message = "Student code is required")
     private String studentCode;
 
     private String khmerName;
@@ -21,5 +20,7 @@ public class CreateStudentRequest {
     private String academicYear;
     private String parentContact;
     private String status;
+    private String cardNumber;
+    private String profileImageUrl;
 }
 

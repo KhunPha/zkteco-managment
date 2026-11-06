@@ -86,6 +86,7 @@ public class UserService {
                 .firstName(request.getFirstName())
                 .lastName(request.getLastName())
                 .phoneNumber(request.getPhoneNumber())
+                .profileImageUrl(request.getProfileImageUrl())
                 .active(true)
                 .locked(false)
                 .roles(roles)
@@ -111,6 +112,7 @@ public class UserService {
         if (request.getFirstName() != null) user.setFirstName(request.getFirstName());
         if (request.getLastName() != null) user.setLastName(request.getLastName());
         if (request.getPhoneNumber() != null) user.setPhoneNumber(request.getPhoneNumber());
+        if (request.getProfileImageUrl() != null) user.setProfileImageUrl(request.getProfileImageUrl());
         if (request.getActive() != null) user.setActive(request.getActive());
         if (request.getLocked() != null) user.setLocked(request.getLocked());
 

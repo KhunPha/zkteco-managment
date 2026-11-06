@@ -23,13 +23,15 @@ api.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
-// Response interceptor to handle token refresh on 401
+// Response interceptor to handle token refresh on 401 or 403 (expired/invalid auth)
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config;
+    const status = error.response?.status;
 
-    if (error.response?.status === 401 && !originalRequest._retry) {
+    // Both 401 Unauthorized and 403 Forbidden (from Spring Security when JWT expires)
+    if ((status === 401 || status === 403) && !originalRequest._retry) {
       originalRequest._retry = true;
 
       if (typeof window !== "undefined") {
@@ -49,13 +51,20 @@ api.interceptors.response.use(
               return api(originalRequest);
             }
           } catch (refreshErr) {
-            // Failed to refresh - clear session
+            // Failed to refresh - clear session and redirect to login
             localStorage.removeItem("access_token");
             localStorage.removeItem("refresh_token");
             localStorage.removeItem("user_data");
             if (window.location.pathname !== "/login") {
               window.location.href = "/login";
             }
+          }
+        } else {
+          // No refresh token available - clear session and redirect
+          localStorage.removeItem("access_token");
+          localStorage.removeItem("user_data");
+          if (window.location.pathname !== "/login") {
+            window.location.href = "/login";
           }
         }
       }

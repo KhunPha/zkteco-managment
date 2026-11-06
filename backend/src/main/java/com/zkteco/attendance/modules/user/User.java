@@ -51,6 +51,9 @@ public class User extends BaseEntity {
     @Column(name = "failed_login_attempts", nullable = false)
     private int failedLoginAttempts = 0;
 
+    @Column(name = "profile_image_url", columnDefinition = "TEXT")
+    private String profileImageUrl;
+
     @Column(name = "last_login_at")
     private Instant lastLoginAt;
 

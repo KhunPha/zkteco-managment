@@ -1,6 +1,7 @@
 package com.zkteco.attendance.modules.zkteco;
 
 import com.zkteco.attendance.common.TimeUtils;
+import com.zkteco.attendance.modules.attendance.AttendanceCalculationEngine;
 import com.zkteco.attendance.modules.attendance.AttendanceRawLog;
 import com.zkteco.attendance.modules.attendance.AttendanceRawLogRepository;
 import com.zkteco.attendance.modules.device.*;
@@ -12,8 +13,11 @@ import org.springframework.transaction.annotation.Transactional;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 @Slf4j
 @Service
@@ -24,6 +28,7 @@ public class ZKTecoPushService {
     private final DeviceCommandRepository commandRepository;
     private final AttendanceRawLogRepository rawLogRepository;
     private final DeviceSyncLogRepository syncLogRepository;
+    private final AttendanceCalculationEngine calculationEngine;
 
     /**
      * Handle ADMS Handshake GET /iclock/cdata
@@ -59,6 +64,7 @@ public class ZKTecoPushService {
         }
 
         int count = 0;
+        Set<LocalDate> affectedDates = new HashSet<>();
         if ("ATTLOG".equalsIgnoreCase(table) || table == null) {
             String[] lines = payload.split("\\r?\\n");
             for (String line : lines) {
@@ -87,6 +93,11 @@ public class ZKTecoPushService {
 
                         String rawKey = (sn != null ? sn : "") + "_" + pin + "_" + (punchTime != null ? punchTime.toString() : timeStr);
                         String idempotencyKey = hashKey(rawKey);
+
+                        LocalDate punchDate = punchTime != null
+                                ? punchTime.atZone(TimeUtils.PHNOM_PENH_ZONE).toLocalDate()
+                                : LocalDate.now(TimeUtils.PHNOM_PENH_ZONE);
+                        affectedDates.add(punchDate);
 
                         if (!rawLogRepository.existsByIdempotencyKey(idempotencyKey)) {
                             AttendanceRawLog rawLog = AttendanceRawLog.builder()
@@ -122,6 +133,18 @@ public class ZKTecoPushService {
                         .completedAt(Instant.now())
                         .build();
                 syncLogRepository.save(syncLog);
+            }
+
+            if (!affectedDates.isEmpty()) {
+                rawLogRepository.flush();
+                for (LocalDate date : affectedDates) {
+                    try {
+                        log.info("Auto-calculating daily attendance for date={} after receiving live punches", date);
+                        calculationEngine.processAttendanceForDate(date);
+                    } catch (Exception ex) {
+                        log.error("Failed to auto-calculate attendance for date {}: {}", date, ex.getMessage(), ex);
+                    }
+                }
             }
         }
 

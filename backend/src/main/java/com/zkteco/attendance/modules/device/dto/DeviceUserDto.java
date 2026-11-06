@@ -23,12 +23,19 @@ public class DeviceUserDto {
     private Long studentId;
     private String studentCode;
     private String studentName;
+    private String studentGrade;
+    private String studentClassName;
+    private String departmentName;
+    private String positionTitle;
+    private String personnelType; // STUDENT, TEACHER, STAFF, USER
     private String nameOnDevice;
     private String privilege;
     private String cardNumber;
+    private int cardHistoryCount;
     private boolean faceEnrolled;
     private int fingerprintCount;
     private String syncStatus;
+    private String status; // ACTIVE, INACTIVE
     private Instant lastSyncedAt;
 }
 
