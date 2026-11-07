@@ -165,10 +165,19 @@ public class FaceBiometricService {
             personnelType = "STUDENT";
         }
 
-        // 4. Save or Update FaceBiometric
-        FaceBiometric face = faceRepository.findByDevicePin(pin)
-                .orElseGet(() -> FaceBiometric.builder().devicePin(pin).build());
+        // 4. Save or Update FaceBiometric (find by employee/student first to prevent orphaned records when code changes!)
+        FaceBiometric face = null;
+        if (employee != null) {
+            face = faceRepository.findByEmployeeId(employee.getId()).orElse(null);
+        } else if (student != null) {
+            face = faceRepository.findByStudentId(student.getId()).orElse(null);
+        }
+        if (face == null) {
+            face = faceRepository.findByDevicePin(pin)
+                    .orElseGet(() -> FaceBiometric.builder().devicePin(pin).build());
+        }
 
+        face.setDevicePin(pin);
         face.setPersonnelType(personnelType);
         face.setEmployee(employee);
         face.setStudent(student);
@@ -210,13 +219,27 @@ public class FaceBiometricService {
         Instant now = Instant.now();
         String punchState = request.getPunchState() != null ? request.getPunchState().toUpperCase() : "CHECK_IN";
 
-        // 1. Resolve Enrolled Person strictly (Reject any unenrolled attempt)
-        FaceBiometric f = faceRepository.findByDevicePin(pin)
-                .orElseThrow(() -> new AppException(ErrorCode.BAD_REQUEST, "Face biometric is not enrolled for PIN / Code: " + pin + ". Access denied."));
+        // 1. Resolve Enrolled Person strictly (Lookup by PIN, then fallback to Employee/Student code)
+        FaceBiometric f = faceRepository.findByDevicePin(pin).orElse(null);
+        if (f == null) {
+            Optional<Employee> emp = employeeRepository.findByEmployeeCodeAndDeletedAtIsNull(pin);
+            if (emp.isPresent()) {
+                f = faceRepository.findByEmployeeId(emp.get().getId()).orElse(null);
+            }
+        }
+        if (f == null) {
+            Optional<Student> stu = studentRepository.findByStudentCodeAndDeletedAtIsNull(pin);
+            if (stu.isPresent()) {
+                f = faceRepository.findByStudentId(stu.get().getId()).orElse(null);
+            }
+        }
+        if (f == null) {
+            throw new AppException(ErrorCode.BAD_REQUEST, "Face biometric is not enrolled for PIN / Code: " + pin + ". Access denied.");
+        }
 
-        // 2. Strict Biometric Threshold Verification (0.35 maximum distance)
-        if (request.getDistance() != null && request.getDistance() > 0.35) {
-            throw new AppException(ErrorCode.BAD_REQUEST, String.format("Biometric match distance %.3f exceeds strict 0.35 threshold. Verification rejected.", request.getDistance()));
+        // 2. Strict Biometric Threshold Verification (0.48 maximum distance with pitch tolerance)
+        if (request.getDistance() != null && request.getDistance() > 0.48) {
+            throw new AppException(ErrorCode.BAD_REQUEST, String.format("Biometric match distance %.3f exceeds 0.48 threshold. Verification rejected.", request.getDistance()));
         }
 
         // 3. Double Server-Side Vector Verification if descriptor provided
@@ -228,8 +251,8 @@ public class FaceBiometricService {
                     List<Float> normEnrolled = normalize(enrolledDesc);
                     double serverDist = calculateDistance(normQuery, normEnrolled);
                     log.info("Server-side biometric validation for PIN {}: serverDistance={}", pin, serverDist);
-                    if (serverDist > 0.34) {
-                        throw new AppException(ErrorCode.BAD_REQUEST, String.format("Biometric verification mismatch: distance %.3f exceeds strict 0.34 threshold", serverDist));
+                    if (serverDist > 0.48) {
+                        throw new AppException(ErrorCode.BAD_REQUEST, String.format("Biometric verification mismatch: distance %.3f exceeds 0.48 threshold", serverDist));
                     }
                 }
             } catch (AppException ae) {
@@ -253,6 +276,9 @@ public class FaceBiometricService {
             code = emp.getEmployeeCode();
             deptOrClass = emp.getDepartment() != null ? emp.getDepartment().getName() : "Office";
             personType = isTeacher(emp) ? "TEACHER" : "EMPLOYEE";
+            if (emp.getProfileImageUrl() != null && !emp.getProfileImageUrl().isBlank()) {
+                photoUrl = emp.getProfileImageUrl();
+            }
         } else if (f.getStudent() != null) {
             Student s = f.getStudent();
             personName = s.getEnglishName();
@@ -260,27 +286,26 @@ public class FaceBiometricService {
             code = s.getStudentCode();
             deptOrClass = (s.getClassName() != null ? s.getClassName() : "") + (s.getGrade() != null ? " (" + s.getGrade() + ")" : "");
             personType = "STUDENT";
+            if (s.getProfileImageUrl() != null && !s.getProfileImageUrl().isBlank()) {
+                photoUrl = s.getProfileImageUrl();
+            }
         }
 
-        // 2. Save snapshot frame to scans directory if provided
-        String scanPhotoPath = null;
-        if (request.getSnapshotBase64() != null && !request.getSnapshotBase64().isBlank()) {
-            scanPhotoPath = saveBase64Image(request.getSnapshotBase64(), "scans", pin);
-            try {
-                FaceScanLog scanLog = FaceScanLog.builder()
-                        .devicePin(pin)
-                        .personName(personName)
-                        .personnelType(personType)
-                        .distance(request.getDistance())
-                        .confidenceScore(request.getConfidence() != null ? request.getConfidence() : (request.getDistance() != null ? Math.max(0, 100 - request.getDistance() * 100) : 98.5))
-                        .photoPath(scanPhotoPath)
-                        .punchState(punchState)
-                        .createdAt(now)
-                        .build();
-                scanLogRepository.save(scanLog);
-            } catch (Exception e) {
-                log.warn("Failed to persist face scan log: {}", e.getMessage());
-            }
+        // 2. Do not store scan snapshot images on disk to conserve server disk space
+        try {
+            FaceScanLog scanLog = FaceScanLog.builder()
+                    .devicePin(pin)
+                    .personName(personName)
+                    .personnelType(personType)
+                    .distance(request.getDistance())
+                    .confidenceScore(request.getConfidence() != null ? request.getConfidence() : (request.getDistance() != null ? Math.max(0, 100 - request.getDistance() * 100) : 98.5))
+                    .photoPath(null)
+                    .punchState(punchState)
+                    .createdAt(now)
+                    .build();
+            scanLogRepository.save(scanLog);
+        } catch (Exception e) {
+            log.warn("Failed to persist face scan log: {}", e.getMessage());
         }
 
         // 3. Create idempotency key (grouped within 3-second window)
@@ -304,31 +329,38 @@ public class FaceBiometricService {
             rawLogRepository.flush();
             logId = saved.getId();
 
-            // 4. Calculate Attendance for today
-            try {
-                LocalDate today = LocalDate.now(TimeUtils.PHNOM_PENH_ZONE);
-                calculationEngine.processAttendanceForDate(today);
-            } catch (Exception ex) {
-                log.error("Failed to auto-calculate daily attendance for face punch: {}", ex.getMessage());
-            }
+            // 4 & 5. Asynchronously calculate attendance & dispatch Telegram alert in background (<2ms response)
+            final String finalDisplayName = khmerName != null && !khmerName.isBlank() ? khmerName + " (" + personName + ")" : personName;
+            final String finalExtra = "📍 " + deptOrClass + (request.getDistance() != null ? String.format(" | Face Match: %.1f%%", Math.max(0, (1.0 - request.getDistance()) * 100)) : "");
+            final String finalCode = code;
+            final String finalPersonType = personType;
+            final String finalPunchState = punchState;
+            final String finalDeviceName = request.getDeviceName() != null ? request.getDeviceName() : "Webcam Face Gate #1";
+            final Instant finalNow = now;
 
-            // 5. Send Real-Time Telegram Broadcast Alert
-            try {
-                String extra = "📍 " + deptOrClass + (request.getDistance() != null ? String.format(" | Face Match: %.1f%%", Math.max(0, (1.0 - request.getDistance()) * 100)) : "");
-                String displayName = khmerName != null && !khmerName.isBlank() ? khmerName + " (" + personName + ")" : personName;
-                telegramService.sendPunchNotification(
-                        displayName,
-                        code,
-                        personType,
-                        extra,
-                        punchState,
-                        now,
-                        "Main Campus",
-                        request.getDeviceName() != null ? request.getDeviceName() : "Webcam Face Gate #1"
-                );
-            } catch (Exception ex) {
-                log.error("Failed to dispatch Telegram punch notification: {}", ex.getMessage());
-            }
+            java.util.concurrent.CompletableFuture.runAsync(() -> {
+                try {
+                    LocalDate today = LocalDate.now(TimeUtils.PHNOM_PENH_ZONE);
+                    calculationEngine.processAttendanceForDate(today);
+                } catch (Exception ex) {
+                    log.error("Failed to auto-calculate daily attendance for face punch: {}", ex.getMessage());
+                }
+
+                try {
+                    telegramService.sendPunchNotification(
+                            finalDisplayName,
+                            finalCode,
+                            finalPersonType,
+                            finalExtra,
+                            finalPunchState,
+                            finalNow,
+                            "Main Campus",
+                            finalDeviceName
+                    );
+                } catch (Exception ex) {
+                    log.error("Failed to dispatch Telegram punch notification: {}", ex.getMessage());
+                }
+            });
         } else {
             log.info("Duplicate face punch suppressed for pin={} within 3s debounce", pin);
         }
@@ -341,7 +373,7 @@ public class FaceBiometricService {
                 .khmerName(khmerName)
                 .personnelType(personType)
                 .departmentOrClass(deptOrClass)
-                .photoUrl(photoUrl != null ? photoUrl : scanPhotoPath)
+                .photoUrl(photoUrl)
                 .punchTime(now)
                 .punchState(punchState)
                 .status("SUCCESS")
@@ -403,22 +435,41 @@ public class FaceBiometricService {
         String khmer = null;
         String code = f.getDevicePin();
         String deptOrClass = "Campus";
+        String officialPhoto = null;
+        String positionOrGrade = null;
+        String branchOrYear = null;
+        String gender = null;
+        String contactInfo = null;
 
         if (f.getEmployee() != null) {
             Employee emp = f.getEmployee();
             khmer = emp.getKhmerName();
             code = emp.getEmployeeCode();
-            deptOrClass = emp.getDepartment() != null ? emp.getDepartment().getName() : "Office";
+            deptOrClass = emp.getDepartment() != null ? emp.getDepartment().getName() : "Office Staff";
+            positionOrGrade = emp.getPosition() != null ? emp.getPosition().getTitle() : "Staff";
+            branchOrYear = emp.getBranch() != null ? emp.getBranch().getName() : "Main Branch";
+            gender = emp.getGender();
+            contactInfo = emp.getPhoneNumber();
+            officialPhoto = emp.getProfileImageUrl();
         } else if (f.getStudent() != null) {
             Student s = f.getStudent();
             khmer = s.getKhmerName();
             code = s.getStudentCode();
             deptOrClass = (s.getClassName() != null ? s.getClassName() : "") + (s.getGrade() != null ? " (" + s.getGrade() + ")" : "");
+            positionOrGrade = s.getGrade() != null ? s.getGrade() : "Student";
+            branchOrYear = s.getAcademicYear() != null ? s.getAcademicYear() : "Current Academic Year";
+            gender = s.getGender();
+            contactInfo = s.getParentContact();
+            officialPhoto = s.getProfileImageUrl();
         }
+
+        // Always show the official profile picture, not the face scanned snapshot
+        String photo = (officialPhoto != null && !officialPhoto.isBlank()) ? officialPhoto : f.getPhotoPath();
+        String activePin = code != null && !code.isBlank() ? code : f.getDevicePin();
 
         return FaceDescriptorDto.builder()
                 .id(f.getId())
-                .devicePin(f.getDevicePin())
+                .devicePin(activePin)
                 .personnelType(f.getPersonnelType())
                 .employeeId(f.getEmployee() != null ? f.getEmployee().getId() : null)
                 .studentId(f.getStudent() != null ? f.getStudent().getId() : null)
@@ -426,7 +477,11 @@ public class FaceBiometricService {
                 .khmerName(khmer)
                 .personnelCode(code)
                 .departmentOrClass(deptOrClass)
-                .photoUrl(f.getPhotoPath())
+                .positionOrGrade(positionOrGrade)
+                .branchOrYear(branchOrYear)
+                .gender(gender)
+                .contactInfo(contactInfo)
+                .photoUrl(photo)
                 .descriptor(descriptor)
                 .qualityScore(f.getQualityScore())
                 .build();

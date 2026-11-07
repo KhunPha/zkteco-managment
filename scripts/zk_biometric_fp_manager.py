@@ -16,6 +16,7 @@ Usage:
 import sys
 import json
 import time
+import socket
 import argparse
 import logging
 import psycopg2
@@ -25,9 +26,39 @@ from zk.finger import Finger
 logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("zk_fp_manager")
 
+def resolve_target(ip, default_port=4370):
+    """
+    Intelligently resolves target IP and port.
+    If given public router IP (203.147.129.237) or IP:PORT, checks if on-premises direct LAN
+    is reachable to avoid NAT loopback timeouts.
+    """
+    ip_str = str(ip or "").strip()
+    port = default_port
+    if ":" in ip_str:
+        parts = ip_str.split(":")
+        ip_str = parts[0]
+        try:
+            port = int(parts[1])
+        except Exception:
+            pass
+
+    if ip_str == "203.147.129.237":
+        candidate = "192.168.1.201" if port == 4371 else "192.168.1.202"
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.4)
+            s.connect((candidate, 4370))
+            s.close()
+            logger.info(f"Resolved public endpoint {ip_str}:{port} -> direct LAN {candidate}:4370")
+            return candidate, 4370
+        except Exception:
+            pass
+
+    return ip_str, port
+
 DEFAULT_DEVICES = [
-    {"id": 1, "name": "IN01-A/ID (192.168.1.201)", "ip": "192.168.1.201", "port": 4370},
-    {"id": 2, "name": "IN01-A/ID (192.168.1.202)", "ip": "192.168.1.202", "port": 4370}
+    {"id": 1, "name": "IN01-A/ID Gate 1 (203.147.129.237:4371)", "ip": "192.168.1.201", "port": 4370},
+    {"id": 2, "name": "IN01-A/ID Gate 2 (203.147.129.237:4370)", "ip": "192.168.1.202", "port": 4370}
 ]
 
 def get_db():
@@ -175,7 +206,8 @@ def enroll_remote_fingerprint(target_ip, pin, fid=0):
     Once user completes, extracts the newly captured template and syncs it to all machines!
     """
     logger.info(f"Initiating remote fingerprint enrollment for PIN={pin}, FID={fid} on {target_ip}...")
-    zk = ZK(target_ip, port=4370, timeout=10, force_udp=False)
+    real_ip, real_port = resolve_target(target_ip, default_port=4370)
+    zk = ZK(real_ip, port=real_port, timeout=10, force_udp=False)
     conn = zk.connect()
     try:
         users = conn.get_users()
@@ -270,6 +302,7 @@ def clear_all_fingerprints():
     """
     Clears all fingerprint templates from all physical terminals and the database,
     resolving duplicate fingerprint errors and allowing clean, fresh enrollment.
+    Uses robust two-pass deep clearing so no cached templates remain on device hardware.
     """
     logger.info("Clearing all fingerprint templates across all physical machines and database...")
     results = []
@@ -281,14 +314,40 @@ def clear_all_fingerprints():
         try:
             zk = ZK(ip, port=port, timeout=10, force_udp=False)
             conn = zk.connect()
+            users = conn.get_users()
+            uid_map = {u.uid: u for u in users}
             templates = conn.get_templates()
             total_on_device = len(templates)
+
+            # Pass 1: standard template deletion with user_id
             for t in templates:
+                u = uid_map.get(t.uid)
+                pin = str(u.user_id) if u else ""
                 try:
-                    if conn.delete_user_template(uid=t.uid, temp_id=t.fid):
+                    if conn.delete_user_template(uid=t.uid, temp_id=t.fid, user_id=pin):
                         deleted_count += 1
                 except Exception as del_err:
                     logger.warn(f"Error deleting template uid={t.uid}, fid={t.fid} on {ip}: {del_err}")
+
+            conn.refresh_data()
+            time.sleep(0.3)
+
+            # Pass 2: Deep wipe on any user who still has remaining templates on machine
+            remaining_templates = conn.get_templates()
+            if remaining_templates:
+                logger.info(f"Machine {ip} still has {len(remaining_templates)} templates after Pass 1. Deep-cleaning affected user biometric slots...")
+                affected_uids = {t.uid for t in remaining_templates}
+                for uid in affected_uids:
+                    u = uid_map.get(uid)
+                    if u:
+                        try:
+                            conn.delete_user(uid=u.uid, user_id=str(u.user_id))
+                            # Re-add user clean (preserves user, name, card badge, privilege)
+                            conn.set_user(uid=u.uid, name=u.name, privilege=u.privilege, password=u.password, group_id=u.group_id, user_id=str(u.user_id), card=u.card)
+                        except Exception as u_err:
+                            logger.warn(f"Error deep-cleaning user {uid} on {ip}: {u_err}")
+                conn.refresh_data()
+
             conn.read_sizes()
             rem = conn.fingers
             conn.disconnect()
@@ -299,7 +358,7 @@ def clear_all_fingerprints():
                 "remaining": rem,
                 "status": "cleared" if rem == 0 else f"{rem} remaining"
             })
-            logger.info(f"Machine {ip}: deleted {deleted_count}/{total_on_device} templates. Remaining fingers: {rem}")
+            logger.info(f"Machine {ip}: deleted templates. Remaining fingers: {rem}")
         except Exception as e:
             logger.error(f"Failed to clear templates on {ip}: {e}")
             results.append({"ip": ip, "error": str(e), "status": "failed"})
@@ -319,9 +378,39 @@ def clear_all_fingerprints():
         "results": results
     }
 
+def clear_all_faces():
+    """
+    Clears all face recognition biometrics from the system and resets face_enrolled.
+    """
+    logger.info("Clearing all face biometrics from database...")
+    db = get_db()
+    with db.cursor() as cur:
+        cur.execute("DELETE FROM face_biometrics;")
+        cur.execute("UPDATE attendance_device_users SET face_enrolled = false;")
+        db.commit()
+    db.close()
+    logger.info("Cleared face_biometrics and reset face_enrolled to false.")
+    return {
+        "success": True,
+        "message": "All face recognition biometrics cleared from database."
+    }
+
+def clear_all_biometrics():
+    """
+    Wipes both physical terminal fingerprints and face recognition biometrics.
+    """
+    fp_res = clear_all_fingerprints()
+    face_res = clear_all_faces()
+    return {
+        "success": True,
+        "message": "All fingerprints and face biometrics completely wiped from physical machines and database.",
+        "fingerprints": fp_res,
+        "face": face_res
+    }
+
 def main():
     parser = argparse.ArgumentParser(description="ZKTeco Biometric Fingerprint Manager")
-    parser.add_argument("--action", required=True, choices=["sync-all", "enroll-remote", "list-templates", "clear-all"])
+    parser.add_argument("--action", required=True, choices=["sync-all", "enroll-remote", "list-templates", "clear-all", "clear-faces", "clear-all-biometrics"])
     parser.add_argument("--ip", default="192.168.1.202")
     parser.add_argument("--pin", default="")
     parser.add_argument("--fid", type=int, default=0)
@@ -331,6 +420,12 @@ def main():
     try:
         if args.action == "clear-all":
             res = clear_all_fingerprints()
+            print(json.dumps(res))
+        elif args.action == "clear-faces":
+            res = clear_all_faces()
+            print(json.dumps(res))
+        elif args.action == "clear-all-biometrics":
+            res = clear_all_biometrics()
             print(json.dumps(res))
         elif args.action == "sync-all":
             res = sync_all_templates()
@@ -352,6 +447,9 @@ def main():
                 rows = [{"pin": r[0], "fid": r[1], "size": r[2], "valid": r[3], "updatedAt": str(r[4])} for r in cur.fetchall()]
             db.close()
             print(json.dumps({"success": True, "count": len(rows), "templates": rows}))
+    except Exception as e:
+        logger.error(f"Fatal error in fp manager: {e}", exc_info=True)
+        print(json.dumps({"success": False, "message": str(e)}))
     except Exception as e:
         logger.error(f"Fatal error in fp manager: {e}", exc_info=True)
         print(json.dumps({"success": False, "message": str(e)}))

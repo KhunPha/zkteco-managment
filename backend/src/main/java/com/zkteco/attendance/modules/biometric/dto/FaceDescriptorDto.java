@@ -22,6 +22,10 @@ public class FaceDescriptorDto {
     private String khmerName;
     private String personnelCode;
     private String departmentOrClass;
+    private String positionOrGrade;
+    private String branchOrYear;
+    private String gender;
+    private String contactInfo;
     private String photoUrl;
     private List<Float> descriptor;
     private Double qualityScore;

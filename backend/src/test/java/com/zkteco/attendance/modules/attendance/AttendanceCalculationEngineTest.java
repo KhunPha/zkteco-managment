@@ -211,5 +211,55 @@ class AttendanceCalculationEngineTest {
             return true;
         }));
     }
+
+    @Test
+    void testProcessAttendance_TwoShiftBothLate() {
+        LocalDate date = LocalDate.of(2026, 11, 4);
+        Shift twoShift = Shift.builder()
+                .code("SHIFT_MORNING_BREAK")
+                .name("Standard 8-Hour Full Shift")
+                .startTime(LocalTime.of(7, 0))
+                .breakStart(LocalTime.of(12, 0))
+                .breakEnd(LocalTime.of(14, 0))
+                .endTime(LocalTime.of(17, 0))
+                .graceLateMinutes(10)
+                .graceEarlyLeaveMinutes(15)
+                .build();
+
+        when(employeeRepository.findAll()).thenReturn(List.of(employee));
+        when(attendanceRecordRepository.findByEmployeeIdAndAttendanceDate(1L, date)).thenReturn(Optional.empty());
+        when(shiftRepository.findByCode("SHIFT_MORNING")).thenReturn(Optional.of(twoShift));
+        when(holidayRepository.isHolidayOnDate(date)).thenReturn(false);
+        when(holidayRepository.existsByHolidayDate(date)).thenReturn(false);
+        when(leaveRequestRepository.findApprovedLeavesOnDate(1L, date)).thenReturn(Collections.emptyList());
+        when(scheduleRepository.findActiveSchedules(1L, date)).thenReturn(Collections.emptyList());
+        when(deviceUserRepository.findByEmployeeId(1L)).thenReturn(Collections.emptyList());
+
+        // Shift 1: In 07:32 (32m late), Out 12:04
+        Instant s1In = TimeUtils.toUtcInstant(LocalDateTime.of(2026, 11, 4, 7, 32));
+        Instant s1Out = TimeUtils.toUtcInstant(LocalDateTime.of(2026, 11, 4, 12, 4));
+        // Shift 2: In 14:21 (21m late), Out 17:00
+        Instant s2In = TimeUtils.toUtcInstant(LocalDateTime.of(2026, 11, 4, 14, 21));
+        Instant s2Out = TimeUtils.toUtcInstant(LocalDateTime.of(2026, 11, 4, 17, 0));
+
+        AttendanceRawLog log1 = AttendanceRawLog.builder().device(device).devicePin("EMP001").punchTime(s1In).punchState("CHECK_IN").build();
+        AttendanceRawLog log2 = AttendanceRawLog.builder().device(device).devicePin("EMP001").punchTime(s1Out).punchState("CHECK_OUT").build();
+        AttendanceRawLog log3 = AttendanceRawLog.builder().device(device).devicePin("EMP001").punchTime(s2In).punchState("CHECK_IN").build();
+        AttendanceRawLog log4 = AttendanceRawLog.builder().device(device).devicePin("EMP001").punchTime(s2Out).punchState("CHECK_OUT").build();
+
+        when(rawLogRepository.findByPunchTimeBetweenOrderByPunchTimeAsc(any(Instant.class), any(Instant.class)))
+                .thenReturn(List.of(log1, log2, log3, log4));
+        when(processingLogRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        calculationEngine.processAttendanceForDate(date);
+
+        verify(attendanceRecordRepository).saveAll(argThat(records -> {
+            AttendanceRecord record = records.iterator().next();
+            assertEquals("LATE", record.getStatus());
+            // Shift 1 late (32m) + Shift 2 late (21m) = 53m
+            assertEquals(53, record.getLateMinutes());
+            return true;
+        }));
+    }
 }
 

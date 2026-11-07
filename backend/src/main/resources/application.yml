@@ -3,6 +3,10 @@ spring:
     name: zkteco-attendance-backend
   profiles:
     active: dev
+  data:
+    web:
+      pageable:
+        max-page-size: 5000
   jackson:
     time-zone: UTC
     date-format: yyyy-MM-dd'T'HH:mm:ss.SSS'Z'

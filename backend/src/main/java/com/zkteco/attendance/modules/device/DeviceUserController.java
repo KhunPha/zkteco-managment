@@ -79,6 +79,29 @@ public class DeviceUserController {
         return ResponseEntity.ok(ApiResponse.ok("Device user unmapped successfully", null));
     }
 
+    @DeleteMapping("/clear-all")
+    @PreAuthorize("hasAuthority('device.update') or hasRole('SUPER_ADMIN') or hasRole('ADMIN')")
+    @Operation(summary = "Clear all device user mappings (unmap all personnel)")
+    public ResponseEntity<ApiResponse<java.util.Map<String, Object>>> clearAllMappedUsers(
+            @RequestParam(required = false) Long targetDeviceId) {
+        return ResponseEntity.ok(ApiResponse.ok(
+                "All device user mappings cleared successfully",
+                deviceService.clearAllMappedUsers(targetDeviceId)
+        ));
+    }
+
+    @PostMapping("/auto-map-all")
+    @PreAuthorize("hasAuthority('device.update') or hasRole('SUPER_ADMIN') or hasRole('ADMIN')")
+    @Operation(summary = "Batch auto-map all active employees and students to device users across all active terminals")
+    public ResponseEntity<ApiResponse<java.util.Map<String, Object>>> autoMapAllPersonnel(
+            @RequestParam(required = false) Long targetDeviceId,
+            @RequestParam(defaultValue = "ALL") String personnelType) {
+        return ResponseEntity.ok(ApiResponse.ok(
+                "Batch device user mapping completed successfully",
+                deviceService.autoMapAllPersonnel(targetDeviceId, personnelType)
+        ));
+    }
+
     @PostMapping("/sync-from-device/{deviceId}")
     @PreAuthorize("hasAuthority('device.sync') or hasRole('SUPER_ADMIN') or hasRole('ADMIN')")
     @Operation(summary = "Read user accounts from terminal and create local mappings")
@@ -159,6 +182,26 @@ public class DeviceUserController {
         return ResponseEntity.ok(ApiResponse.ok(
                 "All device fingerprint data cleared successfully",
                 zkDeviceMasterControlService.clearAllFingerprints()
+        ));
+    }
+
+    @PostMapping("/clear-all-faces")
+    @PreAuthorize("hasAuthority('device.sync') or hasRole('SUPER_ADMIN') or hasRole('ADMIN')")
+    @Operation(summary = "Clear all face biometrics from database and reset user profiles")
+    public ResponseEntity<ApiResponse<com.fasterxml.jackson.databind.JsonNode>> clearAllFaces() {
+        return ResponseEntity.ok(ApiResponse.ok(
+                "All face biometrics cleared successfully",
+                zkDeviceMasterControlService.clearAllFaces()
+        ));
+    }
+
+    @PostMapping("/clear-all-biometrics")
+    @PreAuthorize("hasAuthority('device.sync') or hasRole('SUPER_ADMIN') or hasRole('ADMIN')")
+    @Operation(summary = "Deep wipe: clears both physical machine fingerprints and face recognition biometrics")
+    public ResponseEntity<ApiResponse<com.fasterxml.jackson.databind.JsonNode>> clearAllBiometrics() {
+        return ResponseEntity.ok(ApiResponse.ok(
+                "All biometric data wiped from machines and database",
+                zkDeviceMasterControlService.clearAllBiometrics()
         ));
     }
 

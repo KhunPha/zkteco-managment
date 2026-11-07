@@ -17,6 +17,8 @@ import com.zkteco.attendance.modules.personnel.Student;
 import com.zkteco.attendance.modules.personnel.StudentRepository;
 import com.zkteco.attendance.modules.shift.Shift;
 import com.zkteco.attendance.modules.shift.ShiftRepository;
+import jakarta.persistence.criteria.Join;
+import jakarta.persistence.criteria.JoinType;
 import jakarta.persistence.criteria.Predicate;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -27,6 +29,7 @@ import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -71,16 +74,19 @@ public class AttendanceService {
                 predicates.add(cb.between(root.get("attendanceDate"), startDate, endDate));
             }
 
+            Join<AttendanceRecord, Employee> empJoin = root.join("employee", JoinType.LEFT);
+            Join<AttendanceRecord, Student> stJoin = root.join("student", JoinType.LEFT);
+
             if (employeeId != null) {
-                predicates.add(cb.equal(root.get("employee").get("id"), employeeId));
+                predicates.add(cb.equal(empJoin.get("id"), employeeId));
             }
 
             if (departmentId != null) {
-                predicates.add(cb.equal(root.get("employee").get("department").get("id"), departmentId));
+                predicates.add(cb.equal(empJoin.get("department").get("id"), departmentId));
             }
 
             if (branchId != null) {
-                predicates.add(cb.equal(root.get("employee").get("branch").get("id"), branchId));
+                predicates.add(cb.equal(empJoin.get("branch").get("id"), branchId));
             }
 
             if (status != null && !status.trim().isEmpty()) {
@@ -95,21 +101,21 @@ public class AttendanceService {
                 } else if ("TEACHER".equals(pType)) {
                     predicates.add(cb.isNotNull(root.get("employee")));
                     predicates.add(cb.or(
-                            cb.equal(root.get("employee").get("department").get("id"), 4L),
-                            cb.like(cb.lower(root.get("employee").get("department").get("name")), "%academic%"),
-                            cb.like(cb.lower(root.get("employee").get("position").get("title")), "%teacher%"),
-                            cb.like(cb.lower(root.get("employee").get("position").get("title")), "%lecturer%")
+                            cb.equal(empJoin.get("department").get("id"), 4L),
+                            cb.like(cb.lower(empJoin.get("department").get("name")), "%academic%"),
+                            cb.like(cb.lower(empJoin.get("position").get("title")), "%teacher%"),
+                            cb.like(cb.lower(empJoin.get("position").get("title")), "%lecturer%")
                     ));
                 } else if ("EMPLOYEE".equals(pType) || "STAFF".equals(pType)) {
                     predicates.add(cb.isNotNull(root.get("employee")));
                     predicates.add(cb.and(
                             cb.or(
-                                    cb.isNull(root.get("employee").get("department")),
-                                    cb.notEqual(root.get("employee").get("department").get("id"), 4L)
+                                    cb.isNull(empJoin.get("department")),
+                                    cb.notEqual(empJoin.get("department").get("id"), 4L)
                             ),
                             cb.or(
-                                    cb.isNull(root.get("employee").get("department")),
-                                    cb.notLike(cb.lower(root.get("employee").get("department").get("name")), "%academic%")
+                                    cb.isNull(empJoin.get("department")),
+                                    cb.notLike(cb.lower(empJoin.get("department").get("name")), "%academic%")
                             )
                     ));
                 }
@@ -118,15 +124,15 @@ public class AttendanceService {
             // Comprehensive search across employees & students
             if (search != null && !search.trim().isEmpty()) {
                 String pattern = "%" + search.trim().toLowerCase() + "%";
-                Predicate codeMatch = cb.like(cb.lower(root.get("employee").get("employeeCode")), pattern);
-                Predicate engNameMatch = cb.like(cb.lower(root.get("employee").get("englishName")), pattern);
-                Predicate khNameMatch = cb.like(cb.lower(root.get("employee").get("khmerName")), pattern);
+                Predicate codeMatch = cb.like(cb.lower(empJoin.get("employeeCode")), pattern);
+                Predicate engNameMatch = cb.like(cb.lower(empJoin.get("englishName")), pattern);
+                Predicate khNameMatch = cb.like(cb.lower(empJoin.get("khmerName")), pattern);
 
-                Predicate stCodeMatch = cb.like(cb.lower(root.get("student").get("studentCode")), pattern);
-                Predicate stEngMatch = cb.like(cb.lower(root.get("student").get("englishName")), pattern);
-                Predicate stKhMatch = cb.like(cb.lower(root.get("student").get("khmerName")), pattern);
-                Predicate stGradeMatch = cb.like(cb.lower(root.get("student").get("grade")), pattern);
-                Predicate stClassMatch = cb.like(cb.lower(root.get("student").get("className")), pattern);
+                Predicate stCodeMatch = cb.like(cb.lower(stJoin.get("studentCode")), pattern);
+                Predicate stEngMatch = cb.like(cb.lower(stJoin.get("englishName")), pattern);
+                Predicate stKhMatch = cb.like(cb.lower(stJoin.get("khmerName")), pattern);
+                Predicate stGradeMatch = cb.like(cb.lower(stJoin.get("grade")), pattern);
+                Predicate stClassMatch = cb.like(cb.lower(stJoin.get("className")), pattern);
 
                 predicates.add(cb.or(codeMatch, engNameMatch, khNameMatch, stCodeMatch, stEngMatch, stKhMatch, stGradeMatch, stClassMatch));
             }
@@ -195,6 +201,10 @@ public class AttendanceService {
         String code = pin;
         String type = "EMPLOYEE";
         String deptOrClass = "General Campus";
+        String positionOrGrade = null;
+        String branchOrYear = null;
+        String gender = null;
+        String contactInfo = null;
         String card = null;
         String photo = null;
 
@@ -223,6 +233,10 @@ public class AttendanceService {
                 type = "STUDENT";
                 deptOrClass = (st.getClassName() != null ? st.getClassName() : "") +
                               (st.getGrade() != null ? " (" + st.getGrade() + ")" : "");
+                positionOrGrade = st.getGrade() != null ? st.getGrade() : "Student";
+                branchOrYear = st.getAcademicYear() != null ? st.getAcademicYear() : null;
+                gender = st.getGender();
+                contactInfo = st.getParentContact();
             } else if (du.getEmployee() != null) {
                 Employee emp = du.getEmployee();
                 name = emp.getEnglishName();
@@ -233,6 +247,10 @@ public class AttendanceService {
                                     (emp.getPosition() != null && emp.getPosition().getTitle().toLowerCase().contains("teach"));
                 type = isTeacher ? "TEACHER" : "EMPLOYEE";
                 deptOrClass = emp.getDepartment() != null ? emp.getDepartment().getName() : "Office Staff";
+                positionOrGrade = emp.getPosition() != null ? emp.getPosition().getTitle() : "Staff";
+                branchOrYear = emp.getBranch() != null ? emp.getBranch().getName() : null;
+                gender = emp.getGender();
+                contactInfo = emp.getPhoneNumber();
             }
         }
 
@@ -251,6 +269,10 @@ public class AttendanceService {
                 type = "STUDENT";
                 deptOrClass = (st.getClassName() != null ? st.getClassName() : "") +
                               (st.getGrade() != null ? " (" + st.getGrade() + ")" : "");
+                positionOrGrade = st.getGrade() != null ? st.getGrade() : "Student";
+                branchOrYear = st.getAcademicYear() != null ? st.getAcademicYear() : null;
+                gender = st.getGender();
+                contactInfo = st.getParentContact();
             }
         }
 
@@ -270,6 +292,10 @@ public class AttendanceService {
                                     (emp.getPosition() != null && emp.getPosition().getTitle().toLowerCase().contains("teach"));
                 type = isTeacher ? "TEACHER" : "EMPLOYEE";
                 deptOrClass = emp.getDepartment() != null ? emp.getDepartment().getName() : "Office Staff";
+                positionOrGrade = emp.getPosition() != null ? emp.getPosition().getTitle() : "Staff";
+                branchOrYear = emp.getBranch() != null ? emp.getBranch().getName() : null;
+                gender = emp.getGender();
+                contactInfo = emp.getPhoneNumber();
             }
         }
 
@@ -279,7 +305,24 @@ public class AttendanceService {
             if (faceOpt.isPresent()) {
                 FaceBiometric fb = faceOpt.get();
                 if (photo == null || photo.isBlank()) {
-                    photo = fb.getPhotoPath();
+                    if (fb.getEmployee() != null && fb.getEmployee().getProfileImageUrl() != null && !fb.getEmployee().getProfileImageUrl().isBlank()) {
+                        photo = fb.getEmployee().getProfileImageUrl();
+                    } else if (fb.getStudent() != null && fb.getStudent().getProfileImageUrl() != null && !fb.getStudent().getProfileImageUrl().isBlank()) {
+                        photo = fb.getStudent().getProfileImageUrl();
+                    } else {
+                        photo = fb.getPhotoPath();
+                    }
+                }
+                if (fb.getEmployee() != null) {
+                    if (positionOrGrade == null) positionOrGrade = fb.getEmployee().getPosition() != null ? fb.getEmployee().getPosition().getTitle() : null;
+                    if (branchOrYear == null) branchOrYear = fb.getEmployee().getBranch() != null ? fb.getEmployee().getBranch().getName() : null;
+                    if (gender == null) gender = fb.getEmployee().getGender();
+                    if (contactInfo == null) contactInfo = fb.getEmployee().getPhoneNumber();
+                } else if (fb.getStudent() != null) {
+                    if (positionOrGrade == null) positionOrGrade = fb.getStudent().getGrade();
+                    if (branchOrYear == null) branchOrYear = fb.getStudent().getAcademicYear();
+                    if (gender == null) gender = fb.getStudent().getGender();
+                    if (contactInfo == null) contactInfo = fb.getStudent().getParentContact();
                 }
                 if (("Card / User (" + pin + ")").equals(name) && fb.getPersonName() != null) {
                     name = fb.getPersonName();
@@ -299,6 +342,10 @@ public class AttendanceService {
                 .personnelCode(code)
                 .personnelType(type)
                 .departmentOrClass(deptOrClass)
+                .positionOrGrade(positionOrGrade)
+                .branchOrYear(branchOrYear)
+                .gender(gender)
+                .contactInfo(contactInfo)
                 .cardNumber(card)
                 .profileImageUrl(photo)
                 .punchTime(log.getPunchTime())
@@ -397,6 +444,12 @@ public class AttendanceService {
             displayCode = r.getStudent().getStudentCode();
         }
 
+        // Shift 2 check-out should strictly only reflect actual afternoon checkouts
+        Instant shift2Out = r.getShift2CheckOut();
+        if (shift2Out == null && r.getLastCheckOut() != null && !r.getLastCheckOut().equals(r.getShift1CheckOut())) {
+            shift2Out = r.getLastCheckOut();
+        }
+
         return AttendanceRecordDto.builder()
                 .id(r.getId())
                 .attendanceDate(r.getAttendanceDate())
@@ -418,7 +471,7 @@ public class AttendanceService {
                 .shift1CheckOut(r.getShift1CheckOut())
                 .shift2CheckIn(r.getShift2CheckIn())
                 .lastCheckOut(r.getLastCheckOut())
-                .shift2CheckOut(r.getLastCheckOut())
+                .shift2CheckOut(shift2Out)
                 .inDeviceName(r.getInDevice() != null ? r.getInDevice().getName() : null)
                 .outDeviceName(r.getOutDevice() != null ? r.getOutDevice().getName() : null)
                 .totalWorkMinutes(r.getTotalWorkMinutes())

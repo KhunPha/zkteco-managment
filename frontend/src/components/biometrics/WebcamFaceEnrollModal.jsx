@@ -13,6 +13,7 @@ import {
   UserCheck,
   ShieldCheck,
   Trash2,
+  Zap,
 } from "lucide-react";
 import api from "@/lib/api";
 import {
@@ -22,6 +23,7 @@ import {
   captureFrameBase64,
   averageFaceDescriptors,
   findBestFaceMatch,
+  LivenessDetector,
 } from "@/lib/faceEngine";
 import { kioskAudioEngine } from "@/lib/kioskAudioEngine";
 
@@ -42,11 +44,29 @@ export default function WebcamFaceEnrollModal({
   const [deleting, setDeleting] = useState(false);
   const [enrollSuccess, setEnrollSuccess] = useState(false);
   const [errorMessage, setErrorMessage] = useState(null);
+  const [autoCapture, setAutoCapture] = useState(true);
+  const [autoProgress, setAutoProgress] = useState(0);
 
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
   const detectIntervalRef = useRef(null);
+
+  const autoCaptureRef = useRef(true);
+  const isEnrollingRef = useRef(false);
+  const autoTriggeredRef = useRef(false);
+  const stabilityCounterRef = useRef(0);
+  const errorCooldownRef = useRef(0);
+  const handleCaptureRef = useRef(null);
+  const livenessDetectorRef = useRef(new LivenessDetector());
+
+  useEffect(() => {
+    autoCaptureRef.current = autoCapture;
+  }, [autoCapture]);
+
+  useEffect(() => {
+    isEnrollingRef.current = enrolling;
+  }, [enrolling]);
 
   // Initialize models when modal opens
   useEffect(() => {
@@ -54,6 +74,13 @@ export default function WebcamFaceEnrollModal({
     setEnrollSuccess(false);
     setErrorMessage(null);
     setFaceDetected(false);
+    setAutoProgress(0);
+    stabilityCounterRef.current = 0;
+    autoTriggeredRef.current = false;
+    errorCooldownRef.current = 0;
+    if (livenessDetectorRef.current) {
+      livenessDetectorRef.current.reset();
+    }
 
     let isMounted = true;
     loadFaceModels().then((ok) => {
@@ -115,6 +142,12 @@ export default function WebcamFaceEnrollModal({
     }
     setCameraActive(false);
     setFaceDetected(false);
+    setAutoProgress(0);
+    stabilityCounterRef.current = 0;
+    autoTriggeredRef.current = false;
+    if (livenessDetectorRef.current) {
+      livenessDetectorRef.current.reset();
+    }
   };
 
   const startDetectionLoop = () => {
@@ -124,8 +157,8 @@ export default function WebcamFaceEnrollModal({
       if (!videoRef.current || videoRef.current.paused || videoRef.current.ended)
         return;
 
-      // Ultra-Fast Tiny Detector for smooth 30 FPS camera preview
-      const result = await detectFaceWithDescriptor(videoRef.current, "tiny", 0.45);
+      // Ultra-Fast Tiny Detector with 320px input for effortless long-range detection
+      const result = await detectFaceWithDescriptor(videoRef.current, "tiny", 0.25, 320);
 
       if (canvasRef.current && videoRef.current) {
         const canvas = canvasRef.current;
@@ -176,9 +209,66 @@ export default function WebcamFaceEnrollModal({
           ctx.lineTo(x + width, y + height);
           ctx.lineTo(x + width, y + height - cornerLen);
           ctx.stroke();
+
+          // Evaluate Anti-Spoofing Liveness
+          const liveness = livenessDetectorRef.current.evaluate(result, videoRef.current);
+
+          if (liveness.isScreenSpoof || liveness.isStaticPhoto) {
+            stabilityCounterRef.current = 0;
+            setAutoProgress(0);
+            setFaceDetected(false);
+            setErrorMessage("⚠️ Static Photo / Computer Screen Detected • ហាមស្កេនរូបថត ឬកុំព្យូទ័រ (Real Person Required)");
+            ctx.strokeStyle = "#ef4444";
+            ctx.lineWidth = 3;
+            ctx.setLineDash([6, 6]);
+            ctx.strokeRect(x, y, width, height);
+            ctx.setLineDash([]);
+          } else {
+            // Auto-detection stability evaluation
+            const centerX = x + width / 2;
+            const centerY = y + height / 2;
+            const isCentered =
+              width >= 35 &&
+              centerX > w * 0.08 &&
+              centerX < w * 0.92 &&
+              centerY > h * 0.08 &&
+              centerY < h * 0.92;
+
+            const REQUIRED_FRAMES = 5; // ~500ms of stable face holding still
+            if (
+              isCentered &&
+              result.score >= 0.30 &&
+              liveness.isLive &&
+              !liveness.isScreenSpoof &&
+              !isEnrollingRef.current &&
+              !autoTriggeredRef.current &&
+              Date.now() > errorCooldownRef.current
+            ) {
+              stabilityCounterRef.current += 1;
+              const pct = Math.min(100, Math.round((stabilityCounterRef.current / REQUIRED_FRAMES) * 100));
+              setAutoProgress(pct);
+
+              if (autoCaptureRef.current && stabilityCounterRef.current >= REQUIRED_FRAMES) {
+                autoTriggeredRef.current = true;
+                if (handleCaptureRef.current) {
+                  handleCaptureRef.current();
+                }
+              }
+            } else if (!isCentered || result.score < 0.25 || !liveness.isLive) {
+              if (stabilityCounterRef.current > 0) {
+                stabilityCounterRef.current = Math.max(0, stabilityCounterRef.current - 1);
+                const pct = Math.min(100, Math.round((stabilityCounterRef.current / REQUIRED_FRAMES) * 100));
+                setAutoProgress(pct);
+              }
+            }
+          }
         } else {
           setFaceDetected(false);
           setFaceScore(0);
+          if (stabilityCounterRef.current > 0) {
+            stabilityCounterRef.current = 0;
+            setAutoProgress(0);
+          }
         }
       }
     }, 100);
@@ -190,11 +280,17 @@ export default function WebcamFaceEnrollModal({
     setErrorMessage(null);
 
     try {
+      if (livenessDetectorRef.current && (livenessDetectorRef.current.isScreenSpoof || livenessDetectorRef.current.isStaticPhoto)) {
+        throw new Error(
+          "Anti-Spoofing: Computer screen or photo detected (ហាមប្រើរូបភាពស្កេន ឬកុំព្យូទ័រ)."
+        );
+      }
+
       // 1. High-Speed Multi-Sample Acquisition: 2 quick frames with Tiny detector
       const samples = [];
       let bestBox = null;
       for (let i = 0; i < 2; i++) {
-        const det = await detectFaceWithDescriptor(videoRef.current, "tiny", 0.45);
+        const det = await detectFaceWithDescriptor(videoRef.current, "tiny", 0.35, 320);
         if (det && det.descriptor) {
           samples.push(det.descriptor);
           if (det.box) bestBox = det.box;
@@ -247,6 +343,32 @@ export default function WebcamFaceEnrollModal({
       setEnrollSuccess(true);
       kioskAudioEngine.ensureUnlocked();
 
+      // Pleasant Biometric Enrollment Chime (Two-tone rising sine chime)
+      try {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtx) {
+          const ctx = new AudioCtx();
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.type = "sine";
+          const t = ctx.currentTime;
+          osc.frequency.setValueAtTime(587.33, t); // D5
+          osc.frequency.setValueAtTime(880, t + 0.12); // A5
+          gain.gain.setValueAtTime(0.3, t);
+          gain.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+          osc.start(t);
+          osc.stop(t + 0.5);
+        }
+      } catch (_) {}
+
+      // Voice TTS: State "Enrollment Success", NEVER "Thank you for attendance"!
+      kioskAudioEngine.speakPersonnelName(
+        `Enrollment Success for ${person.name}`,
+        `បានចុះឈ្មោះផ្ទៃមុខជោគជ័យ ${person.khmerName || person.name}`
+      );
+
       // Invalidate descriptors query cache so Live Kiosk scanner updates immediately
       queryClient.invalidateQueries({ queryKey: ["enrolled-face-descriptors"] });
       queryClient.invalidateQueries({ queryKey: ["device-users"] });
@@ -255,16 +377,22 @@ export default function WebcamFaceEnrollModal({
         stopCamera();
         if (onSuccess) onSuccess();
         onClose();
-      }, 1200);
+      }, 1400);
     } catch (err) {
       console.error("Enrollment failed:", err);
       setErrorMessage(
         err.response?.data?.message || err.message || "Failed to enroll face biometric"
       );
+      errorCooldownRef.current = Date.now() + 4000;
+      autoTriggeredRef.current = false;
+      stabilityCounterRef.current = 0;
+      setAutoProgress(0);
     } finally {
       setEnrolling(false);
     }
   };
+
+  handleCaptureRef.current = handleCaptureAndEnroll;
 
   // Alternative: upload photo from local file
   const handleFileUpload = async (e) => {
@@ -433,31 +561,53 @@ export default function WebcamFaceEnrollModal({
         )}
 
         {/* Tab Selector */}
-        <div className="px-5 pt-3 flex items-center gap-2 border-b border-slate-100 dark:border-slate-800">
-          <button
-            type="button"
-            onClick={() => setActiveTab("webcam")}
-            className={`pb-2 px-3 text-xs font-bold border-b-2 transition-colors cursor-pointer flex items-center gap-1.5 ${
-              activeTab === "webcam"
-                ? "border-indigo-600 text-indigo-600 dark:text-indigo-400"
-                : "border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
-            }`}
-          >
-            <Camera size={14} />
-            <span>Webcam Live Capture</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab("upload")}
-            className={`pb-2 px-3 text-xs font-bold border-b-2 transition-colors cursor-pointer flex items-center gap-1.5 ${
-              activeTab === "upload"
-                ? "border-indigo-600 text-indigo-600 dark:text-indigo-400"
-                : "border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
-            }`}
-          >
-            <Upload size={14} />
-            <span>Upload Photo from PC</span>
-          </button>
+        <div className="px-5 pt-3 flex items-center justify-between border-b border-slate-100 dark:border-slate-800">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setActiveTab("webcam")}
+              className={`pb-2 px-3 text-xs font-bold border-b-2 transition-colors cursor-pointer flex items-center gap-1.5 ${
+                activeTab === "webcam"
+                  ? "border-indigo-600 text-indigo-600 dark:text-indigo-400"
+                  : "border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+              }`}
+            >
+              <Camera size={14} />
+              <span>Webcam Live Capture</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab("upload")}
+              className={`pb-2 px-3 text-xs font-bold border-b-2 transition-colors cursor-pointer flex items-center gap-1.5 ${
+                activeTab === "upload"
+                  ? "border-indigo-600 text-indigo-600 dark:text-indigo-400"
+                  : "border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+              }`}
+            >
+              <Upload size={14} />
+              <span>Upload Photo from PC</span>
+            </button>
+          </div>
+
+          {activeTab === "webcam" && (
+            <button
+              type="button"
+              onClick={() => setAutoCapture(!autoCapture)}
+              className={`mb-2 px-2.5 py-1 rounded-full text-[11px] font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                autoCapture
+                  ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 shadow-xs hover:bg-emerald-500/25"
+                  : "bg-slate-100 dark:bg-slate-800 text-slate-500 border border-slate-200 dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-700"
+              }`}
+              title={
+                autoCapture
+                  ? "Auto-Capture is ON: Looking steadily at camera will auto-save biometrics"
+                  : "Auto-Capture is OFF: You must click Capture button"
+              }
+            >
+              <Zap size={13} className={autoCapture ? "fill-emerald-500 text-emerald-500" : ""} />
+              <span>{autoCapture ? "Auto-Save: ON" : "Auto-Save: OFF"}</span>
+            </button>
+          )}
         </div>
 
         {/* Modal Body */}
@@ -513,19 +663,25 @@ export default function WebcamFaceEnrollModal({
                     {/* Oval Alignment Guide - Spacious Face Area */}
                     <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
                       <div
-                        className={`w-56 h-72 sm:w-64 sm:h-80 rounded-[48%] border-2 transition-all duration-300 ${
-                          faceDetected
-                            ? "border-emerald-400/90 shadow-[0_0_25px_rgba(16,185,129,0.45)] scale-102"
+                        className={`w-56 h-72 sm:w-64 sm:h-80 rounded-[48%] border-2 transition-all duration-200 ${
+                          autoProgress >= 100
+                            ? "border-emerald-300 shadow-[0_0_35px_rgba(52,211,153,0.85)] scale-103 bg-emerald-500/15"
+                            : autoProgress > 0
+                            ? "border-emerald-400 shadow-[0_0_25px_rgba(16,185,129,0.55)] scale-102"
+                            : faceDetected
+                            ? "border-emerald-400/90 shadow-[0_0_15px_rgba(16,185,129,0.35)]"
                             : "border-white/30 border-dashed shadow-[0_0_15px_rgba(255,255,255,0.1)]"
                         }`}
                       />
                     </div>
 
                     {/* HUD Status Pill */}
-                    <div className="absolute top-3 left-3 right-3 flex items-center justify-between pointer-events-none">
+                    <div className="absolute top-3 left-3 right-3 flex items-center justify-between pointer-events-none z-10">
                       <span
                         className={`text-[10px] px-2.5 py-1 rounded-full font-bold backdrop-blur-md flex items-center gap-1.5 ${
-                          faceDetected
+                          autoProgress >= 100
+                            ? "bg-emerald-500 text-white shadow-lg shadow-emerald-500/50"
+                            : faceDetected
                             ? "bg-emerald-500/90 text-white shadow-md shadow-emerald-500/30"
                             : "bg-slate-900/80 text-slate-300"
                         }`}
@@ -535,20 +691,91 @@ export default function WebcamFaceEnrollModal({
                             faceDetected ? "bg-white animate-pulse" : "bg-amber-400"
                           }`}
                         />
-                        <span>{faceDetected ? `Face Detected (${faceScore}%)` : "Looking for face..."}</span>
+                        <span>
+                          {autoCapture && autoProgress > 0
+                            ? `Auto-Capturing (${autoProgress}%)`
+                            : faceDetected
+                            ? `Face Detected (${faceScore}%)`
+                            : "Looking for face..."}
+                        </span>
                       </span>
 
-                      <span className="text-[10px] px-2 py-0.5 rounded-md bg-black/60 text-slate-300 font-mono backdrop-blur-md">
-                        AI Biometrics
+                      <span className="text-[10px] px-2 py-0.5 rounded-md bg-black/60 text-emerald-400 font-mono backdrop-blur-md flex items-center gap-1 font-semibold">
+                        {autoCapture ? <Zap size={11} className="fill-emerald-400" /> : null}
+                        <span>{autoCapture ? "AUTO-SAVE" : "MANUAL"}</span>
                       </span>
                     </div>
+
+                    {/* Live Auto-Save Progress Banner */}
+                    {autoCapture && autoProgress > 0 && !enrolling && !enrollSuccess && (
+                      <div className="absolute bottom-4 inset-x-4 flex justify-center pointer-events-none z-20">
+                        <div className="w-full max-w-xs px-3.5 py-2 rounded-2xl bg-slate-950/90 backdrop-blur-md border border-emerald-500/60 shadow-2xl flex items-center gap-3">
+                          <div className="relative w-8 h-8 flex items-center justify-center shrink-0">
+                            <svg className="w-8 h-8 transform -rotate-90">
+                              <circle
+                                cx="16"
+                                cy="16"
+                                r="13"
+                                stroke="currentColor"
+                                strokeWidth="3"
+                                className="text-white/20"
+                                fill="transparent"
+                              />
+                              <circle
+                                cx="16"
+                                cy="16"
+                                r="13"
+                                stroke="currentColor"
+                                strokeWidth="3"
+                                className="text-emerald-400 transition-all duration-100"
+                                fill="transparent"
+                                strokeDasharray={2 * Math.PI * 13}
+                                strokeDashoffset={2 * Math.PI * 13 * (1 - autoProgress / 100)}
+                                strokeLinecap="round"
+                              />
+                            </svg>
+                            <span className="absolute text-[10px] font-black text-emerald-400 font-mono">
+                              {autoProgress}%
+                            </span>
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-[11px] font-bold text-white flex items-center gap-1.5 truncate">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping shrink-0" />
+                              <span>{autoProgress >= 100 ? "ផ្ទៀងផ្ទាត់ជោគជ័យ! កំពុងរក្សាទុក..." : "សូមព្រិចភ្នែកដើម្បីរក្សាទុក..."}</span>
+                            </div>
+                            <div className="text-[10px] text-emerald-300/90 font-medium truncate">
+                              {autoProgress >= 100 ? "Live Person Confirmed! Saving..." : "Blink eyes to verify real person & auto-save"}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Processing Overlay when Enrolling */}
+                    {enrolling && (
+                      <div className="absolute inset-0 bg-black/70 backdrop-blur-xs flex flex-col items-center justify-center z-30 space-y-2">
+                        <div className="p-3 rounded-2xl bg-emerald-600 text-white shadow-xl animate-pulse">
+                          <Sparkles size={28} />
+                        </div>
+                        <span className="text-white text-sm font-bold">Enrolling Face ID...</span>
+                        <span className="text-slate-300 text-xs">Generating 128-d biometrics & portrait</span>
+                      </div>
+                    )}
                   </>
                 )}
               </div>
 
               {/* Instructions */}
               <p className="text-center text-[11px] text-slate-500 dark:text-slate-400">
-                សូមតម្រង់ផ្ទៃមុខចំកណ្តាលកាមេរ៉ា ហើយចុច <b>"Capture & Enroll"</b> ដើម្បីរក្សាទុក
+                {autoCapture ? (
+                  <span>
+                    តម្រង់ផ្ទៃមុខរកកាមេរ៉ា ហើយ <b>ព្រិចភ្នែក</b> — ប្រព័ន្ធនឹង <b>រក្សាទុកស្វ័យប្រវត្តិ (Auto-Save)</b> ដោយសុវត្ថិភាព
+                  </span>
+                ) : (
+                  <span>
+                    សូមតម្រង់ផ្ទៃមុខរកកាមេរ៉ា <b>ព្រិចភ្នែក</b> ហើយចុច <b>"Capture & Enroll"</b> ដើម្បីរក្សាទុក
+                  </span>
+                )}
               </p>
 
               {/* Action Button */}
@@ -556,12 +783,27 @@ export default function WebcamFaceEnrollModal({
                 type="button"
                 disabled={enrolling || !faceDetected}
                 onClick={handleCaptureAndEnroll}
-                className="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold text-xs shadow-lg shadow-indigo-600/25 transition-all flex items-center justify-center gap-2 cursor-pointer"
+                className={`w-full py-3 rounded-xl font-bold text-xs shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                  enrolling
+                    ? "bg-slate-700 text-slate-300"
+                    : autoCapture
+                    ? "bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-600/25"
+                    : "bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-600/25"
+                }`}
               >
                 {enrolling ? (
                   <>
                     <RefreshCw size={16} className="animate-spin" />
                     <span>Processing Biometrics & Saving...</span>
+                  </>
+                ) : autoCapture ? (
+                  <>
+                    <Zap size={16} className={autoProgress > 0 ? "animate-pulse fill-white" : ""} />
+                    <span>
+                      {autoProgress > 0
+                        ? `⚡ Auto-Saving... ${autoProgress}% (Click for instant save)`
+                        : "⚡ Auto-Detect & Save Active (Or Click to Save)"}
+                    </span>
                   </>
                 ) : (
                   <>

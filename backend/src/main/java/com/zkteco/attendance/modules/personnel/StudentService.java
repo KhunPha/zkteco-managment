@@ -29,6 +29,8 @@ public class StudentService {
     private final StudentRepository studentRepository;
     private final com.zkteco.attendance.modules.device.TerminalSyncService terminalSyncService;
     private final PersonnelCodeGeneratorService personnelCodeGeneratorService;
+    private final com.zkteco.attendance.modules.biometric.FaceBiometricRepository faceBiometricRepository;
+    private final com.zkteco.attendance.modules.device.DeviceUserRepository deviceUserRepository;
 
     @Transactional(readOnly = true)
     public String getNextStudentCode() {
@@ -128,7 +130,29 @@ public class StudentService {
                 if (studentRepository.existsByStudentCodeAndDeletedAtIsNull(newCode)) {
                     throw new AppException(ErrorCode.DUPLICATE_RESOURCE, "Student code already exists: " + newCode);
                 }
+                String oldCode = s.getStudentCode();
                 s.setStudentCode(newCode);
+
+                // Seamlessly keep FaceBiometrics and Device Users in sync with updated student code
+                try {
+                    faceBiometricRepository.findByStudentId(s.getId()).ifPresent(fb -> {
+                        fb.setDevicePin(newCode);
+                        faceBiometricRepository.save(fb);
+                    });
+                    if (oldCode != null && !oldCode.isBlank()) {
+                        faceBiometricRepository.findByDevicePin(oldCode).ifPresent(fb -> {
+                            fb.setDevicePin(newCode);
+                            faceBiometricRepository.save(fb);
+                        });
+                        List<com.zkteco.attendance.modules.device.AttendanceDeviceUser> devUsers = deviceUserRepository.findByDevicePin(oldCode);
+                        for (com.zkteco.attendance.modules.device.AttendanceDeviceUser du : devUsers) {
+                            du.setDevicePin(newCode);
+                            deviceUserRepository.save(du);
+                        }
+                    }
+                } catch (Exception syncErr) {
+                    // Ignore sync exception if none found
+                }
             }
         }
 

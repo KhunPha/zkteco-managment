@@ -36,6 +36,8 @@ public class DeviceUserDto {
     private int fingerprintCount;
     private String syncStatus;
     private String status; // ACTIVE, INACTIVE
+    private String profileImageUrl;
+    private String personnelKhmerName;
     private Instant lastSyncedAt;
 }
 

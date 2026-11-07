@@ -65,11 +65,7 @@ export default function ImageUploadDropzone({
       const formData = new FormData();
       formData.append("file", file);
 
-      const res = await api.post("/api/v1/uploads/image", formData, {
-        headers: {
-          "Content-Type": "multipart/form-data",
-        },
-      });
+      const res = await api.post("/api/v1/uploads/image", formData);
 
       const url = res.data?.data?.url;
       if (url) {

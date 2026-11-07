@@ -58,7 +58,7 @@ export default function DailyAttendancePage() {
       const res = await api.get(url);
       return res.data?.data;
     },
-    refetchInterval: isToday ? 1000 : false, // Ultra-fast 1-second live stream for today
+    refetchInterval: isToday ? 300 : false, // Ultra-fast 300ms live stream for today
     staleTime: 0,
     refetchIntervalInBackground: true,
   });
@@ -103,7 +103,7 @@ export default function DailyAttendancePage() {
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
               <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
             </span>
-            <span>{isToday ? "⚡ Ultra-Fast Live Sync (1s)" : "Historical Archive"}</span>
+            <span>{isToday ? "⚡ Ultra-Fast Live Sync (300ms)" : "Historical Archive"}</span>
           </div>
           {calcMsg && (
             <span className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800 animate-fade-in shadow-2xs">
@@ -372,7 +372,7 @@ export default function DailyAttendancePage() {
                   const s1In = r.shift1CheckIn || r.firstCheckIn;
                   const s1Out = r.shift1CheckOut;
                   const s2In = r.shift2CheckIn;
-                  const s2Out = r.shift2CheckOut || r.lastCheckOut;
+                  const s2Out = r.shift2CheckOut || (r.lastCheckOut && r.lastCheckOut !== r.shift1CheckOut ? r.lastCheckOut : null);
 
                   return (
                     <tr key={r.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-colors">

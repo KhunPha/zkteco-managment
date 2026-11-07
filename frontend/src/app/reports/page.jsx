@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   FileSpreadsheet,
@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import api from "@/lib/api";
 import { formatDate, formatTime } from "@/lib/utils";
+import Pagination from "@/components/common/Pagination";
 
 export default function ReportsPage() {
   const getToday = () => new Date().toISOString().split("T")[0];
@@ -42,6 +43,8 @@ export default function ReportsPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [isExporting, setIsExporting] = useState(false);
   const [activePreset, setActivePreset] = useState("this-month");
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(25);
 
   // Quick date presets for HR
   const applyPreset = (preset) => {
@@ -91,6 +94,8 @@ export default function ReportsPage() {
       const res = await api.get(url);
       return res.data?.data || [];
     },
+    staleTime: 60000,
+    refetchOnWindowFocus: false,
   });
 
   // Client-side quick search by Name, Code, Grade or Class + Role sorting
@@ -136,6 +141,17 @@ export default function ReportsPage() {
     });
     return list;
   }, [rawReportRecords, searchQuery, personnelType, orderBy]);
+
+  // Reset to first page when filtering or querying changes
+  useEffect(() => {
+    setPage(0);
+  }, [startDate, endDate, departmentId, status, personnelType, orderBy, searchQuery]);
+
+  const totalPages = Math.ceil(filteredRecords.length / pageSize) || 1;
+  const paginatedRecords = useMemo(() => {
+    const startIdx = page * pageSize;
+    return filteredRecords.slice(startIdx, startIdx + pageSize);
+  }, [filteredRecords, page, pageSize]);
 
   // Executive HR Analytics
   const metrics = useMemo(() => {
@@ -619,7 +635,7 @@ export default function ReportsPage() {
                   </td>
                 </tr>
               ) : (
-                filteredRecords.map((r, idx) => {
+                paginatedRecords.map((r, idx) => {
                   const isStudent = r.personnelType === "STUDENT";
                   const isTeacher = r.personnelType === "TEACHER";
                   const displayName = isStudent ? (r.studentName || r.employeeName) : (r.employeeName || r.studentName);
@@ -627,7 +643,7 @@ export default function ReportsPage() {
                   const s1In = r.shift1CheckIn || r.firstCheckIn;
                   const s1Out = r.shift1CheckOut;
                   const s2In = r.shift2CheckIn;
-                  const s2Out = r.shift2CheckOut || r.lastCheckOut;
+                  const s2Out = r.shift2CheckOut || (r.lastCheckOut && r.lastCheckOut !== r.shift1CheckOut ? r.lastCheckOut : null);
 
                   return (
                     <tr
@@ -635,7 +651,7 @@ export default function ReportsPage() {
                       className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors"
                     >
                       <td className="py-3 px-3 text-center text-slate-400 font-mono text-[10px] border-r border-slate-100 dark:border-slate-800">
-                        {idx + 1}
+                        {page * pageSize + idx + 1}
                       </td>
                       <td className="py-3 px-3 font-mono font-semibold text-slate-700 dark:text-slate-300 border-r border-slate-100 dark:border-slate-800 whitespace-nowrap">
                         {r.attendanceDate}
@@ -805,6 +821,21 @@ export default function ReportsPage() {
             </tbody>
           </table>
         </div>
+
+        {/* High-Performance Pagination Footer */}
+        <Pagination
+          currentPage={page}
+          totalPages={totalPages}
+          totalElements={filteredRecords.length}
+          pageSize={pageSize}
+          pageSizeOptions={[25, 50, 100, 200]}
+          onPageChange={(newPage) => setPage(newPage)}
+          onPageSizeChange={(newSize) => {
+            setPageSize(newSize);
+            setPage(0);
+          }}
+          itemLabel="attendance records"
+        />
       </div>
     </div>
   );

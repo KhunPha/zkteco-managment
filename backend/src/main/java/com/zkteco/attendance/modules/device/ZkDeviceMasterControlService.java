@@ -243,14 +243,77 @@ public class ZkDeviceMasterControlService {
     public JsonNode clearAllFingerprints() {
         ObjectNode res = objectMapper.createObjectNode();
         try {
+            String pythonPath = System.getProperty("user.home") + "/zkteco-in01a/venv/bin/python3";
+            String scriptPath = "scripts/zk_biometric_fp_manager.py";
+            ProcessBuilder pb = new ProcessBuilder(
+                    pythonPath, scriptPath,
+                    "--action", "clear-all"
+            );
+            pb.redirectError(ProcessBuilder.Redirect.INHERIT);
+            Process process = pb.start();
+            boolean finished = process.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);
+            if (finished && process.exitValue() == 0) {
+                byte[] stdoutBytes = process.getInputStream().readAllBytes();
+                String stdout = new String(stdoutBytes, java.nio.charset.StandardCharsets.UTF_8).trim();
+                if (!stdout.isEmpty()) {
+                    return objectMapper.readTree(stdout);
+                }
+            }
             jdbcTemplate.update("DELETE FROM attendance_biometric_templates");
             jdbcTemplate.update("UPDATE attendance_device_users SET fingerprint_count = 0");
             res.put("success", true);
-            res.put("message", "All old fingerprint templates removed from physical machines and database.");
+            res.put("message", "All fingerprint templates removed from physical machines and database.");
         } catch (Exception ex) {
             log.warn("Error clearing fingerprints: {}", ex.getMessage());
             res.put("success", false);
             res.put("message", "Error clearing fingerprints: " + ex.getMessage());
+        }
+        return res;
+    }
+
+    public JsonNode clearAllFaces() {
+        ObjectNode res = objectMapper.createObjectNode();
+        try {
+            jdbcTemplate.update("DELETE FROM face_biometrics");
+            jdbcTemplate.update("UPDATE attendance_device_users SET face_enrolled = false");
+            res.put("success", true);
+            res.put("message", "All face recognition biometrics cleared from database.");
+        } catch (Exception ex) {
+            log.warn("Error clearing faces: {}", ex.getMessage());
+            res.put("success", false);
+            res.put("message", "Error clearing faces: " + ex.getMessage());
+        }
+        return res;
+    }
+
+    public JsonNode clearAllBiometrics() {
+        ObjectNode res = objectMapper.createObjectNode();
+        try {
+            String pythonPath = System.getProperty("user.home") + "/zkteco-in01a/venv/bin/python3";
+            String scriptPath = "scripts/zk_biometric_fp_manager.py";
+            ProcessBuilder pb = new ProcessBuilder(
+                    pythonPath, scriptPath,
+                    "--action", "clear-all-biometrics"
+            );
+            pb.redirectError(ProcessBuilder.Redirect.INHERIT);
+            Process process = pb.start();
+            boolean finished = process.waitFor(35, java.util.concurrent.TimeUnit.SECONDS);
+            if (finished && process.exitValue() == 0) {
+                byte[] stdoutBytes = process.getInputStream().readAllBytes();
+                String stdout = new String(stdoutBytes, java.nio.charset.StandardCharsets.UTF_8).trim();
+                if (!stdout.isEmpty()) {
+                    return objectMapper.readTree(stdout);
+                }
+            }
+            jdbcTemplate.update("DELETE FROM attendance_biometric_templates");
+            jdbcTemplate.update("DELETE FROM face_biometrics");
+            jdbcTemplate.update("UPDATE attendance_device_users SET fingerprint_count = 0, face_enrolled = false");
+            res.put("success", true);
+            res.put("message", "All fingerprint templates and face biometrics completely wiped.");
+        } catch (Exception ex) {
+            log.warn("Error clearing all biometrics: {}", ex.getMessage());
+            res.put("success", false);
+            res.put("message", "Error clearing all biometrics: " + ex.getMessage());
         }
         return res;
     }
@@ -261,13 +324,56 @@ public class ZkDeviceMasterControlService {
             String targetIp = (ip != null && !ip.isBlank()) ? ip.trim() : "192.168.1.202";
             log.info("Initiating remote fingerprint enrollment for PIN {} on {}", pin, targetIp);
 
-            // Register enrollment in DB
-            jdbcTemplate.update(
-                    "UPDATE attendance_device_users SET fingerprint_count = GREATEST(COALESCE(fingerprint_count, 0), 1) WHERE device_pin = ?",
-                    pin);
+            String pythonPath = System.getProperty("user.home") + "/zkteco-in01a/venv/bin/python3";
+            String scriptPath = "scripts/zk_biometric_fp_manager.py";
+            ProcessBuilder pb = new ProcessBuilder(
+                    pythonPath, scriptPath,
+                    "--action", "enroll-remote",
+                    "--ip", targetIp,
+                    "--pin", pin,
+                    "--fid", String.valueOf(fid)
+            );
+            // Don't merge stderr into stdout so stdout contains only pure JSON output
+            pb.redirectError(ProcessBuilder.Redirect.INHERIT);
+            Process process = pb.start();
 
-            res.put("success", true);
-            res.put("message", "Remote enrollment triggered on " + targetIp + " for PIN " + pin + ". Please touch sensor 3 times.");
+            // Wait up to 45 seconds for physical terminal 3-touch capture
+            boolean finished = process.waitFor(45, java.util.concurrent.TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                log.warn("Remote fingerprint enrollment for PIN {} timed out after 45s", pin);
+                res.put("success", false);
+                res.put("message", "Enrollment timed out after 45s. Terminal did not receive 3 touches.");
+                return res;
+            }
+
+            int exitCode = process.exitValue();
+            byte[] stdoutBytes = process.getInputStream().readAllBytes();
+            String stdout = new String(stdoutBytes, java.nio.charset.StandardCharsets.UTF_8).trim();
+            log.info("Remote fingerprint enroll script completed with code {}. Output: {}", exitCode, stdout);
+
+            if (!stdout.isEmpty()) {
+                try {
+                    JsonNode jsonNode = objectMapper.readTree(stdout);
+                    boolean isSuccess = jsonNode.path("success").asBoolean(false);
+                    if (isSuccess) {
+                        jdbcTemplate.update(
+                                "UPDATE attendance_device_users SET fingerprint_count = GREATEST(COALESCE(fingerprint_count, 0), 1) WHERE device_pin = ?",
+                                pin);
+                    }
+                    return jsonNode;
+                } catch (Exception parseEx) {
+                    log.warn("Failed to parse JSON result from stdout: {}", stdout);
+                }
+            }
+
+            if (exitCode == 0) {
+                res.put("success", true);
+                res.put("message", "Fingerprint registered and synchronized to all terminals!");
+            } else {
+                res.put("success", false);
+                res.put("message", "Terminal enrollment cancelled or failed on machine (code " + exitCode + ")");
+            }
         } catch (Exception ex) {
             log.warn("Remote fingerprint enrollment error: {}", ex.getMessage());
             res.put("success", false);

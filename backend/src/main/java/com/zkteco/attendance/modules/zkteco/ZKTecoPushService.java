@@ -107,7 +107,10 @@ public class ZKTecoPushService {
                                 : LocalDate.now(TimeUtils.PHNOM_PENH_ZONE);
                         affectedDates.add(punchDate);
 
-                        if (!rawLogRepository.existsByIdempotencyKey(idempotencyKey)) {
+                        Optional<AttendanceRawLog> existingOpt = rawLogRepository.findByIdempotencyKey(idempotencyKey);
+                        boolean isNew = existingOpt.isEmpty();
+
+                        if (isNew) {
                             AttendanceRawLog rawLog = AttendanceRawLog.builder()
                                     .device(device)
                                     .deviceSn(sn != null ? sn : "UNKNOWN")
@@ -121,7 +124,9 @@ public class ZKTecoPushService {
                                     .build();
                             rawLogRepository.save(rawLog);
                             count++;
+                        }
 
+                        if (isNew || (existingOpt.isPresent() && !existingOpt.get().isProcessed())) {
                             // Dispatch Telegram Alert asynchronously to Teacher / Staff / Student Group
                             try {
                                 Optional<AttendanceDeviceUser> devUserOpt = deviceUserRepository.findByDeviceSerialNumberAndDevicePin(sn, pin);
@@ -337,7 +342,7 @@ public class ZKTecoPushService {
         return switch (code.trim()) {
             case "1" -> "FINGERPRINT";
             case "2" -> "PASSWORD";
-            case "3" -> "CARD";
+            case "3", "4" -> "CARD";
             case "15" -> "FACE";
             default -> "OTHER";
         };

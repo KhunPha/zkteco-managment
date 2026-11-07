@@ -22,6 +22,10 @@ public class LiveScanEventDto {
     private String personnelCode;
     private String personnelType; // STUDENT, TEACHER, EMPLOYEE
     private String departmentOrClass;
+    private String positionOrGrade;
+    private String branchOrYear;
+    private String gender;
+    private String contactInfo;
     private String cardNumber;
     private String profileImageUrl;
     private Instant punchTime;

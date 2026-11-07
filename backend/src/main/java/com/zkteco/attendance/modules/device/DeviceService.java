@@ -48,6 +48,8 @@ import java.util.concurrent.Executors;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.HashSet;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -70,6 +72,7 @@ public class DeviceService {
     private final TerminalSyncService terminalSyncService;
     private final ZkDeviceMasterControlService masterControlService;
     private final com.zkteco.attendance.modules.system.TelegramNotificationService telegramService;
+    private final org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
 
     // Devices CRUD
     @Transactional(readOnly = true)
@@ -1400,6 +1403,11 @@ public class DeviceService {
             status = "INACTIVE";
         }
 
+        String photoUrl = u.getEmployee() != null ? u.getEmployee().getProfileImageUrl()
+                : (u.getStudent() != null ? u.getStudent().getProfileImageUrl() : null);
+        String khmerName = u.getEmployee() != null ? u.getEmployee().getKhmerName()
+                : (u.getStudent() != null ? u.getStudent().getKhmerName() : null);
+
         return DeviceUserDto.builder()
                 .id(u.getId())
                 .deviceId(u.getDevice().getId())
@@ -1425,6 +1433,8 @@ public class DeviceService {
                 .fingerprintCount(u.getFingerprintCount())
                 .syncStatus(u.getSyncStatus())
                 .status(status)
+                .profileImageUrl(photoUrl)
+                .personnelKhmerName(khmerName)
                 .lastSyncedAt(u.getLastSyncedAt())
                 .build();
     }
@@ -1508,5 +1518,205 @@ public class DeviceService {
         String devName = device.getName();
 
         telegramService.sendPunchNotification(personName, pin, personType, extraDetail, punchState, punchTime, branchName, devName);
+    }
+
+    /**
+     * Batch auto-maps all active Employees and Students to device users across all active terminals.
+     * Assigns keypad PIN = employeeCode/studentCode, English name, and auto-links existing
+     * fingerprints, face IDs, and RFID cards.
+     */
+    @Transactional
+    public Map<String, Object> autoMapAllPersonnel(Long targetDeviceId, String personnelType) {
+        List<AttendanceDevice> targets;
+        if (targetDeviceId != null) {
+            targets = List.of(findDevice(targetDeviceId));
+        } else {
+            targets = deviceRepository.findAllByActiveTrue();
+            if (targets.isEmpty()) {
+                targets = deviceRepository.findAll();
+            }
+        }
+
+        if (targets.isEmpty()) {
+            throw new AppException(ErrorCode.RESOURCE_NOT_FOUND, "No active biometric devices configured to map users to");
+        }
+
+        String scope = (personnelType != null && !personnelType.isBlank()) ? personnelType.trim().toUpperCase() : "ALL";
+
+        // Pre-load existing keys: deviceId_devicePin
+        Set<String> existingKeys = deviceUserRepository.findAll().stream()
+                .map(u -> u.getDevice().getId() + "_" + u.getDevicePin())
+                .collect(Collectors.toSet());
+
+        // Pre-load enrolled fingerprint counts from database
+        Map<String, Integer> fpCounts = new HashMap<>();
+        try {
+            List<Object[]> fpRows = jdbcTemplate.query(
+                    "SELECT device_pin, COUNT(DISTINCT finger_index) FROM attendance_biometric_templates GROUP BY device_pin",
+                    (rs, rowNum) -> new Object[]{rs.getString(1), rs.getInt(2)}
+            );
+            for (Object[] row : fpRows) {
+                if (row[0] != null) fpCounts.put((String) row[0], (Integer) row[1]);
+            }
+        } catch (Exception ex) {
+            log.debug("Note pre-loading fp templates: {}", ex.getMessage());
+        }
+
+        // Pre-load enrolled face pins
+        Set<String> facePins = new HashSet<>();
+        try {
+            List<String> fPins = jdbcTemplate.query(
+                    "SELECT DISTINCT device_pin FROM face_biometrics WHERE device_pin IS NOT NULL",
+                    (rs, rowNum) -> rs.getString(1)
+            );
+            facePins.addAll(fPins);
+        } catch (Exception ex) {
+            log.debug("Note pre-loading face pins: {}", ex.getMessage());
+        }
+
+        // Pre-load card numbers from card history
+        Map<String, String> cardMap = new HashMap<>();
+        try {
+            List<Object[]> cardRows = jdbcTemplate.query(
+                    "SELECT device_pin, card_number FROM card_history WHERE card_number IS NOT NULL AND card_number <> '' ORDER BY id DESC",
+                    (rs, rowNum) -> new Object[]{rs.getString(1), rs.getString(2)}
+            );
+            for (Object[] row : cardRows) {
+                if (row[0] != null && row[1] != null && !cardMap.containsKey((String) row[0])) {
+                    cardMap.put((String) row[0], (String) row[1]);
+                }
+            }
+        } catch (Exception ex) {
+            log.debug("Note pre-loading card numbers: {}", ex.getMessage());
+        }
+
+        List<AttendanceDeviceUser> toSave = new ArrayList<>();
+        int mappedEmployees = 0;
+        int mappedStudents = 0;
+        int skippedCount = 0;
+
+        // 1. Employees
+        if ("ALL".equals(scope) || "EMPLOYEE".equals(scope)) {
+            List<Employee> employees = employeeRepository.findByDeletedAtIsNull();
+            for (Employee emp : employees) {
+                String pin = emp.getEmployeeCode();
+                if (pin == null || pin.isBlank()) continue;
+                pin = pin.trim();
+
+                String name = emp.getEnglishName();
+                if (name == null || name.isBlank()) name = emp.getKhmerName();
+                if (name == null || name.isBlank()) name = "Staff " + pin;
+
+                int fpCount = fpCounts.getOrDefault(pin, 0);
+                boolean faceEnrolled = facePins.contains(pin);
+                String card = cardMap.get(pin);
+
+                for (AttendanceDevice dev : targets) {
+                    String key = dev.getId() + "_" + pin;
+                    if (existingKeys.contains(key)) {
+                        skippedCount++;
+                        continue;
+                    }
+
+                    AttendanceDeviceUser devUser = AttendanceDeviceUser.builder()
+                            .device(dev)
+                            .devicePin(pin)
+                            .employee(emp)
+                            .nameOnDevice(name)
+                            .privilege("NORMAL_USER")
+                            .faceEnrolled(faceEnrolled)
+                            .fingerprintCount(fpCount)
+                            .cardNumber(card)
+                            .syncStatus("SYNCED")
+                            .lastSyncedAt(Instant.now())
+                            .status("ACTIVE")
+                            .build();
+
+                    toSave.add(devUser);
+                    existingKeys.add(key);
+                    mappedEmployees++;
+                }
+            }
+        }
+
+        // 2. Students
+        if ("ALL".equals(scope) || "STUDENT".equals(scope)) {
+            List<Student> students = studentRepository.findAll().stream()
+                    .filter(s -> s.getDeletedAt() == null)
+                    .toList();
+            for (Student st : students) {
+                String pin = st.getStudentCode();
+                if (pin == null || pin.isBlank()) continue;
+                pin = pin.trim();
+
+                String name = st.getEnglishName();
+                if (name == null || name.isBlank()) name = st.getKhmerName();
+                if (name == null || name.isBlank()) name = "Student " + pin;
+
+                int fpCount = fpCounts.getOrDefault(pin, 0);
+                boolean faceEnrolled = facePins.contains(pin);
+                String card = cardMap.get(pin);
+
+                for (AttendanceDevice dev : targets) {
+                    String key = dev.getId() + "_" + pin;
+                    if (existingKeys.contains(key)) {
+                        skippedCount++;
+                        continue;
+                    }
+
+                    AttendanceDeviceUser devUser = AttendanceDeviceUser.builder()
+                            .device(dev)
+                            .devicePin(pin)
+                            .student(st)
+                            .nameOnDevice(name)
+                            .privilege("NORMAL_USER")
+                            .faceEnrolled(faceEnrolled)
+                            .fingerprintCount(fpCount)
+                            .cardNumber(card)
+                            .syncStatus("SYNCED")
+                            .lastSyncedAt(Instant.now())
+                            .status("ACTIVE")
+                            .build();
+
+                    toSave.add(devUser);
+                    existingKeys.add(key);
+                    mappedStudents++;
+                }
+            }
+        }
+
+        if (!toSave.isEmpty()) {
+            deviceUserRepository.saveAll(toSave);
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("success", true);
+        result.put("totalMapped", toSave.size());
+        result.put("mappedEmployees", mappedEmployees);
+        result.put("mappedStudents", mappedStudents);
+        result.put("skippedAlreadyMapped", skippedCount);
+        result.put("targetDevicesCount", targets.size());
+        result.put("message", String.format(
+                "Successfully mapped %d personnel (%d employees, %d students) across %d terminals! %d existing mappings were preserved.",
+                toSave.size(), mappedEmployees, mappedStudents, targets.size(), skippedCount
+        ));
+        return result;
+    }
+
+    @Transactional
+    public Map<String, Object> clearAllMappedUsers(Long targetDeviceId) {
+        int deletedCount;
+        if (targetDeviceId != null) {
+            deletedCount = jdbcTemplate.update("DELETE FROM attendance_device_users WHERE device_id = ?", targetDeviceId);
+        } else {
+            deletedCount = jdbcTemplate.update("DELETE FROM attendance_device_users");
+        }
+        log.info("Cleared {} device user mappings (targetDeviceId={})", deletedCount, targetDeviceId);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("success", true);
+        result.put("deletedCount", deletedCount);
+        result.put("targetDeviceId", targetDeviceId);
+        result.put("message", String.format("Successfully cleared %d device user mappings.", deletedCount));
+        return result;
     }
 }

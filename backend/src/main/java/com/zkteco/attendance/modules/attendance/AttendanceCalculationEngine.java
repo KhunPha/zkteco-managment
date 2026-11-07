@@ -169,6 +169,7 @@ public class AttendanceCalculationEngine {
                     record.setFirstCheckIn(null);
                     record.setShift1CheckOut(null);
                     record.setShift2CheckIn(null);
+                    record.setShift2CheckOut(null);
                     record.setLastCheckOut(null);
                     record.setTotalWorkMinutes(0);
                     record.setLateMinutes(0);
@@ -184,6 +185,7 @@ public class AttendanceCalculationEngine {
                     record.setFirstCheckIn(firstCheckIn);
                     record.setShift1CheckOut(tsp.s1Out);
                     record.setShift2CheckIn(tsp.s2In);
+                    record.setShift2CheckOut(tsp.s2Out);
                     record.setLastCheckOut(lastCheckOut != null && !lastCheckOut.equals(firstCheckIn) ? lastCheckOut : null);
 
                     record.setInDevice(tsp.inDevice);
@@ -197,25 +199,48 @@ public class AttendanceCalculationEngine {
                     int totalWorkMinutes = 0;
 
                     if (shift != null) {
-                        LocalTime inLocalTime = TimeUtils.toPhnomPenhLocalTime(firstCheckIn);
-                        LocalTime shiftStart = shift.getStartTime();
                         int graceLate = shift.getGraceLateMinutes();
+                        int graceEarly = shift.getGraceEarlyLeaveMinutes();
 
-                        // Late Calculation
-                        if (inLocalTime.isAfter(shiftStart.plusMinutes(graceLate))) {
-                            lateMinutes = (int) Duration.between(shiftStart, inLocalTime).toMinutes();
+                        // 1. Shift 1 Late Calculation
+                        int s1Late = 0;
+                        if (tsp.s1In != null) {
+                            LocalTime s1InTime = TimeUtils.toPhnomPenhLocalTime(tsp.s1In);
+                            LocalTime shiftStart = shift.getStartTime();
+                            if (s1InTime.isAfter(shiftStart.plusMinutes(graceLate))) {
+                                s1Late = (int) Duration.between(shiftStart, s1InTime).toMinutes();
+                            }
                         }
+
+                        // 2. Shift 2 Late Calculation (Afternoon shift starting after break)
+                        int s2Late = 0;
+                        if (tsp.s2In != null && shift.getBreakEnd() != null) {
+                            LocalTime s2InTime = TimeUtils.toPhnomPenhLocalTime(tsp.s2In);
+                            LocalTime s2Start = shift.getBreakEnd();
+                            if (s2InTime.isAfter(s2Start.plusMinutes(graceLate))) {
+                                s2Late = (int) Duration.between(s2Start, s2InTime).toMinutes();
+                            }
+                        } else if (tsp.s1In == null && tsp.s2In != null && shift.getBreakEnd() == null) {
+                            LocalTime s2InTime = TimeUtils.toPhnomPenhLocalTime(tsp.s2In);
+                            LocalTime shiftStart = shift.getStartTime();
+                            if (s2InTime.isAfter(shiftStart.plusMinutes(graceLate))) {
+                                s2Late = (int) Duration.between(shiftStart, s2InTime).toMinutes();
+                            }
+                        }
+
+                        // Total late minutes across both Shift 1 and Shift 2
+                        lateMinutes = s1Late + s2Late;
 
                         // Break duration
                         if (shift.getBreakStart() != null && shift.getBreakEnd() != null) {
                             breakMinutes = (int) Duration.between(shift.getBreakStart(), shift.getBreakEnd()).toMinutes();
                         }
 
-                        // Early Departure & Overtime (when final check-out exists)
-                        if (record.getLastCheckOut() != null) {
-                            LocalTime outLocalTime = TimeUtils.toPhnomPenhLocalTime(record.getLastCheckOut());
+                        // Early Departure & Overtime (only when afternoon/final check-out exists, or when not current ongoing day)
+                        if (tsp.s2Out != null || (tsp.s1Out != null && tsp.s2In == null && !date.equals(LocalDate.now()))) {
+                            Instant effectiveOut = tsp.s2Out != null ? tsp.s2Out : tsp.s1Out;
+                            LocalTime outLocalTime = TimeUtils.toPhnomPenhLocalTime(effectiveOut);
                             LocalTime shiftEnd = shift.getEndTime();
-                            int graceEarly = shift.getGraceEarlyLeaveMinutes();
 
                             if (outLocalTime.isBefore(shiftEnd.minusMinutes(graceEarly))) {
                                 earlyLeaveMinutes = (int) Duration.between(outLocalTime, shiftEnd).toMinutes();
@@ -230,13 +255,13 @@ public class AttendanceCalculationEngine {
                             long s1 = Duration.between(tsp.s1In, tsp.s1Out).toMinutes();
                             long s2 = Duration.between(tsp.s2In, tsp.s2Out).toMinutes();
                             totalWorkMinutes = (int) (Math.max(0, s1) + Math.max(0, s2));
+                        } else if (tsp.s1In != null && tsp.s1Out != null && tsp.s2In == null) {
+                            totalWorkMinutes = (int) Math.max(0, Duration.between(tsp.s1In, tsp.s1Out).toMinutes());
+                        } else if (tsp.s2In != null && tsp.s2Out != null && tsp.s1In == null) {
+                            totalWorkMinutes = (int) Math.max(0, Duration.between(tsp.s2In, tsp.s2Out).toMinutes());
                         } else if (firstCheckIn != null && record.getLastCheckOut() != null) {
                             long rawDuration = Duration.between(firstCheckIn, record.getLastCheckOut()).toMinutes();
                             totalWorkMinutes = (int) Math.max(0, rawDuration - breakMinutes);
-                        } else if (tsp.s1In != null && tsp.s1Out != null) {
-                            totalWorkMinutes = (int) Math.max(0, Duration.between(tsp.s1In, tsp.s1Out).toMinutes());
-                        } else if (tsp.s2In != null && tsp.s2Out != null) {
-                            totalWorkMinutes = (int) Math.max(0, Duration.between(tsp.s2In, tsp.s2Out).toMinutes());
                         }
                     }
 
@@ -316,6 +341,7 @@ public class AttendanceCalculationEngine {
                     record.setFirstCheckIn(null);
                     record.setShift1CheckOut(null);
                     record.setShift2CheckIn(null);
+                    record.setShift2CheckOut(null);
                     record.setLastCheckOut(null);
                     record.setTotalWorkMinutes(0);
                     record.setLateMinutes(0);
@@ -329,6 +355,7 @@ public class AttendanceCalculationEngine {
                     record.setFirstCheckIn(firstCheckIn);
                     record.setShift1CheckOut(tsp.s1Out);
                     record.setShift2CheckIn(tsp.s2In);
+                    record.setShift2CheckOut(tsp.s2Out);
                     record.setLastCheckOut(lastCheckOut != null && !lastCheckOut.equals(firstCheckIn) ? lastCheckOut : null);
 
                     record.setInDevice(tsp.inDevice);
@@ -336,12 +363,30 @@ public class AttendanceCalculationEngine {
 
                     int lateMinutes = 0;
                     if (defaultShift != null) {
-                        LocalTime inLocalTime = TimeUtils.toPhnomPenhLocalTime(firstCheckIn);
-                        LocalTime shiftStart = defaultShift.getStartTime();
                         int graceLate = defaultShift.getGraceLateMinutes();
-                        if (inLocalTime.isAfter(shiftStart.plusMinutes(graceLate))) {
-                            lateMinutes = (int) Duration.between(shiftStart, inLocalTime).toMinutes();
+                        int s1Late = 0;
+                        if (tsp.s1In != null) {
+                            LocalTime s1InTime = TimeUtils.toPhnomPenhLocalTime(tsp.s1In);
+                            LocalTime shiftStart = defaultShift.getStartTime();
+                            if (s1InTime.isAfter(shiftStart.plusMinutes(graceLate))) {
+                                s1Late = (int) Duration.between(shiftStart, s1InTime).toMinutes();
+                            }
                         }
+                        int s2Late = 0;
+                        if (tsp.s2In != null && defaultShift.getBreakEnd() != null) {
+                            LocalTime s2InTime = TimeUtils.toPhnomPenhLocalTime(tsp.s2In);
+                            LocalTime s2Start = defaultShift.getBreakEnd();
+                            if (s2InTime.isAfter(s2Start.plusMinutes(graceLate))) {
+                                s2Late = (int) Duration.between(s2Start, s2InTime).toMinutes();
+                            }
+                        } else if (tsp.s1In == null && tsp.s2In != null && defaultShift.getBreakEnd() == null) {
+                            LocalTime s2InTime = TimeUtils.toPhnomPenhLocalTime(tsp.s2In);
+                            LocalTime shiftStart = defaultShift.getStartTime();
+                            if (s2InTime.isAfter(shiftStart.plusMinutes(graceLate))) {
+                                s2Late = (int) Duration.between(shiftStart, s2InTime).toMinutes();
+                            }
+                        }
+                        lateMinutes = s1Late + s2Late;
                     }
 
                     record.setLateMinutes(lateMinutes);

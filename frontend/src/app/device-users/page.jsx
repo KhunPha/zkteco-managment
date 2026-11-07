@@ -35,12 +35,18 @@ import {
   Calendar,
   Filter,
   UserCheck,
+  UserX,
   Camera,
+  X,
 } from "lucide-react";
 import api from "@/lib/api";
 import Pagination from "@/components/common/Pagination";
 import Portal from "@/components/common/Portal";
 import WebcamFaceEnrollModal from "@/components/biometrics/WebcamFaceEnrollModal";
+
+// Academic years for card renewal and validity
+const ACADEMIC_YEARS = ["2026-2027", "2025-2026", "2024-2025", "2023-2024"];
+const STUDENT_GRADES = ["Grade 12", "Grade 11", "Grade 10", "Grade 9", "Grade 8", "Grade 7"];
 
 // Smart RFID Card number parser: supports decimal, Wiegand (e.g. 197, 27883), and Hex
 function parseRfidCardInput(raw) {
@@ -108,6 +114,9 @@ export default function DeviceUsersPage() {
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(15);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showAutoMapModal, setShowAutoMapModal] = useState(false);
+  const [autoMapScope, setAutoMapScope] = useState("ALL"); // ALL, EMPLOYEE, STUDENT
+  const [autoMapTargetDeviceId, setAutoMapTargetDeviceId] = useState("");
   const [showBiometricsModal, setShowBiometricsModal] = useState(false);
   const [showSyncModal, setShowSyncModal] = useState(false);
   const [selectedUser, setSelectedUser] = useState(null);
@@ -133,6 +142,8 @@ export default function DeviceUsersPage() {
   });
   const [cardChangeMsg, setCardChangeMsg] = useState(null);
   const [cardChangeLoading, setCardChangeLoading] = useState(false);
+  const [userCardHistory, setUserCardHistory] = useState([]);
+  const [loadingCardHistory, setLoadingCardHistory] = useState(false);
 
   // Rapid Batch Card Scanner state
   const [showBatchScan, setShowBatchScan] = useState(false);
@@ -155,12 +166,15 @@ export default function DeviceUsersPage() {
     devicePin: "",
     nameOnDevice: "",
     privilege: "NORMAL_USER",
+    personnelType: "EMPLOYEE", // EMPLOYEE, STUDENT, UNASSIGNED
     employeeId: "",
+    studentId: "",
     faceEnrolled: false,
     fingerprintCount: 0,
     cardNumber: "",
     password: "",
   });
+  const [personnelSearch, setPersonnelSearch] = useState("");
 
   // Edit Biometrics state
   const [biometricsForm, setBiometricsForm] = useState({
@@ -178,10 +192,11 @@ export default function DeviceUsersPage() {
 
   // Remote Machine Fingerprint Enrollment & Cross-Terminal Sync
   const [isSyncingAllFp, setIsSyncingAllFp] = useState(false);
-  const [enrollTargetGate, setEnrollTargetGate] = useState("192.168.1.202");
+  const [enrollTargetGate, setEnrollTargetGate] = useState("203.147.129.237:4370");
   const [enrollFingerIndex, setEnrollFingerIndex] = useState(0);
   const [isEnrollingFp, setIsEnrollingFp] = useState(false);
   const [enrollFeedback, setEnrollFeedback] = useState(null);
+  const [fpEnrollUser, setFpEnrollUser] = useState(null);
 
   // Multi-terminal sync state
   const [syncForm, setSyncForm] = useState({
@@ -200,10 +215,55 @@ export default function DeviceUsersPage() {
   const { data: employees } = useQuery({
     queryKey: ["all-employees"],
     queryFn: async () => {
-      const res = await api.get("/api/v1/employees?size=100");
+      const res = await api.get("/api/v1/employees?size=3000");
       return res.data?.data?.content || [];
     },
   });
+
+  const { data: students } = useQuery({
+    queryKey: ["all-students"],
+    queryFn: async () => {
+      const res = await api.get("/api/v1/students?size=3000");
+      return res.data?.data?.content || [];
+    },
+  });
+
+  // Query unpaginated device user mappings across all terminals for Fast Card Scanner
+  const { data: allDeviceUsersRaw } = useQuery({
+    queryKey: ["batch-roster-users"],
+    queryFn: async () => {
+      const res = await api.get("/api/v1/device-users?page=0&size=5000");
+      return res.data?.data?.content || [];
+    },
+    staleTime: 15000,
+  });
+
+  const filteredPersonnel = useMemo(() => {
+    const q = (personnelSearch || "").trim().toLowerCase();
+    if (createForm.personnelType === "EMPLOYEE") {
+      const list = employees || [];
+      if (!q) return list;
+      return list.filter(
+        (e) =>
+          (e.englishName && e.englishName.toLowerCase().includes(q)) ||
+          (e.khmerName && e.khmerName.toLowerCase().includes(q)) ||
+          (e.employeeCode && e.employeeCode.toLowerCase().includes(q)) ||
+          (e.department && e.department.toLowerCase().includes(q))
+      );
+    } else if (createForm.personnelType === "STUDENT") {
+      const list = students || [];
+      if (!q) return list;
+      return list.filter(
+        (s) =>
+          (s.englishName && s.englishName.toLowerCase().includes(q)) ||
+          (s.khmerName && s.khmerName.toLowerCase().includes(q)) ||
+          (s.studentCode && s.studentCode.toLowerCase().includes(q)) ||
+          (s.className && s.className.toLowerCase().includes(q)) ||
+          (s.grade && s.grade.toLowerCase().includes(q))
+      );
+    }
+    return [];
+  }, [employees, students, createForm.personnelType, personnelSearch]);
 
   const { data: usersData, isLoading, refetch } = useQuery({
     queryKey: ["device-users", search, selectedDeviceId, statusFilter, biometricFilter, personnelFilter, sortBy, page, pageSize],
@@ -244,12 +304,15 @@ export default function DeviceUsersPage() {
     onSuccess: () => {
       queryClient.invalidateQueries(["device-users"]);
       setShowCreateModal(false);
+      setPersonnelSearch("");
       setCreateForm({
         deviceId: "",
         devicePin: "",
         nameOnDevice: "",
         privilege: "NORMAL_USER",
+        personnelType: "EMPLOYEE",
         employeeId: "",
+        studentId: "",
         faceEnrolled: false,
         fingerprintCount: 0,
         cardNumber: "",
@@ -259,6 +322,29 @@ export default function DeviceUsersPage() {
     },
     onError: (err) => {
       showFeedback(`Mapping failed: ${err.response?.data?.message || err.message}`, "error");
+    },
+  });
+
+  // Batch Auto-Map All Users Mutation
+  const autoMapMutation = useMutation({
+    mutationFn: async ({ scope, deviceId }) => {
+      let url = `/api/v1/device-users/auto-map-all?personnelType=${scope || "ALL"}`;
+      if (deviceId) {
+        url += `&targetDeviceId=${deviceId}`;
+      }
+      const res = await api.post(url);
+      return res.data?.data;
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries(["device-users"]);
+      setShowAutoMapModal(false);
+      showFeedback(
+        `Batch mapping complete! Mapped ${data?.createdCount?.toLocaleString() || 0} user records across terminals. Active personnel: ${data?.totalPersonnel?.toLocaleString() || 0}.`,
+        "success"
+      );
+    },
+    onError: (err) => {
+      showFeedback(`Auto-map failed: ${err.response?.data?.message || err.message}`, "error");
     },
   });
 
@@ -379,7 +465,7 @@ export default function DeviceUsersPage() {
     setShowBiometricsModal(true);
   };
 
-  // Open quick scan for a single user (pushes to all machines linked to this person)
+  // Open quick scan / card reader for a single user (pushes to all machines linked to this person)
   const openQuickScanModal = (u) => {
     setQuickScanUser(u);
     setQuickCardInput(u.cardNumber || "");
@@ -389,6 +475,42 @@ export default function DeviceUsersPage() {
       quickInputRef.current?.focus();
       quickInputRef.current?.select();
     }, 80);
+  };
+
+  // Alias for opening card enrollment modal as a card reader
+  const openCardModal = (u) => {
+    openQuickScanModal(u);
+  };
+
+  const handleCardChangeSubmit = async (e) => {
+    if (e) e.preventDefault();
+    if (!cardModalUser) return;
+    const cleanNumber = parseRfidCardInput(cardChangeForm.newCardNumber);
+    if (!cleanNumber) {
+      setCardChangeMsg({ type: "error", text: "Please enter a valid RFID card number" });
+      return;
+    }
+    setCardChangeLoading(true);
+    setCardChangeMsg(null);
+    try {
+      const ids = cardModalUser.deviceUserIds || [cardModalUser.id];
+      await Promise.all(
+        ids.map((devUserId) =>
+          api.post(`/api/v1/device-users/${devUserId}/change-card`, {
+            newCardNumber: cleanNumber,
+            academicYear: cardChangeForm.academicYear,
+            notes: cardChangeForm.notes,
+          })
+        )
+      );
+      setCardChangeMsg({ type: "success", text: `Card ${cleanNumber} updated successfully!` });
+      queryClient.invalidateQueries(["device-users"]);
+      setTimeout(() => setShowCardModal(false), 900);
+    } catch (err) {
+      setCardChangeMsg({ type: "error", text: err.response?.data?.message || err.message });
+    } finally {
+      setCardChangeLoading(false);
+    }
   };
 
   const handleQuickCardSubmit = async (e) => {
@@ -467,16 +589,16 @@ export default function DeviceUsersPage() {
   };
 
   const handleClearAllFingerprints = async () => {
-    if (!window.confirm("WARNING: Are you sure you want to remove ALL old fingerprint data from both physical terminals and database? Users, names, and card numbers will NOT be deleted.")) {
+    if (!window.confirm("WARNING: Are you sure you want to remove ALL fingerprint data from both physical terminals and database? Users, names, and card numbers will NOT be deleted.")) {
       return;
     }
     setIsSyncingAllFp(true);
-    setActionFeedback({ type: "info", text: "Wiping all old fingerprints from physical terminals..." });
+    setActionFeedback({ type: "info", text: "Wiping all fingerprints from physical terminals..." });
     try {
       await api.post("/api/v1/device-users/clear-all-fingerprints");
       setActionFeedback({
         type: "success",
-        text: "All old fingerprint templates removed from physical machines! Terminals are now completely clear of duplicate fingerprints."
+        text: "All fingerprint templates removed from physical machines and database! Verified 0 templates remaining."
       });
       queryClient.invalidateQueries(["device-users"]);
       queryClient.invalidateQueries(["batch-roster-users"]);
@@ -490,36 +612,151 @@ export default function DeviceUsersPage() {
     }
   };
 
-  const handleRemoteEnrollFingerprint = async () => {
-    if (!biometricsForm.devicePin) {
+  const handleClearAllFaces = async () => {
+    if (!window.confirm("WARNING: Are you sure you want to delete ALL enrolled face biometrics from the system? Personnel profiles and RFID cards will NOT be deleted.")) {
+      return;
+    }
+    setIsSyncingAllFp(true);
+    setActionFeedback({ type: "info", text: "Clearing all face recognition biometrics..." });
+    try {
+      await api.post("/api/v1/device-users/clear-all-faces");
+      setActionFeedback({
+        type: "success",
+        text: "All face recognition biometrics successfully deleted from database!"
+      });
+      queryClient.invalidateQueries(["device-users"]);
+      queryClient.invalidateQueries(["batch-roster-users"]);
+    } catch (err) {
+      setActionFeedback({
+        type: "error",
+        text: "Clear Face failed: " + (err.response?.data?.message || err.message)
+      });
+    } finally {
+      setIsSyncingAllFp(false);
+    }
+  };
+
+  const handleClearAllBiometrics = async () => {
+    if (!window.confirm("CRITICAL WARNING: Are you sure you want to completely WIPE ALL FINGERPRINTS from physical terminals AND ALL FACE BIOMETRICS? Personnel records and RFID cards will be kept.")) {
+      return;
+    }
+    setIsSyncingAllFp(true);
+    setActionFeedback({ type: "info", text: "Wiping all fingerprints from machines & all faces from system..." });
+    try {
+      await api.post("/api/v1/device-users/clear-all-biometrics");
+      setActionFeedback({
+        type: "success",
+        text: "All biometric fingerprints (machines) and face descriptors (database) completely wiped!"
+      });
+      queryClient.invalidateQueries(["device-users"]);
+      queryClient.invalidateQueries(["batch-roster-users"]);
+    } catch (err) {
+      setActionFeedback({
+        type: "error",
+        text: "Wipe biometrics failed: " + (err.response?.data?.message || err.message)
+      });
+    } finally {
+      setIsSyncingAllFp(false);
+    }
+  };
+
+  const handleClearAllMappedUsers = async () => {
+    const filterText = selectedDeviceId
+      ? `all mapped device users on selected terminal (${devices?.find(d => String(d.id) === String(selectedDeviceId))?.name || 'this terminal'})`
+      : "ALL mapped device users across all terminals";
+
+    if (!window.confirm(`WARNING: Are you sure you want to clean/unmap ${filterText}?\n\nThis removes the terminal mappings from the device users roster so you can freshly auto-map or re-map. Personnel records (Employees and Students) in the system database will NOT be deleted.`)) {
+      return;
+    }
+    setIsSyncingAllFp(true);
+    setActionFeedback({ type: "info", text: "Clearing device user mappings..." });
+    try {
+      let url = "/api/v1/device-users/clear-all";
+      if (selectedDeviceId) {
+        url += `?targetDeviceId=${selectedDeviceId}`;
+      }
+      const res = await api.delete(url);
+      const count = res.data?.data?.deletedCount || 0;
+      setActionFeedback({
+        type: "success",
+        text: `Successfully cleaned ${count.toLocaleString()} device user mappings!`
+      });
+      queryClient.invalidateQueries(["device-users"]);
+      queryClient.invalidateQueries(["batch-roster-users"]);
+    } catch (err) {
+      setActionFeedback({
+        type: "error",
+        text: "Clean mapped users failed: " + (err.response?.data?.message || err.message)
+      });
+    } finally {
+      setIsSyncingAllFp(false);
+    }
+  };
+
+  const playSuccessChime = () => {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const now = ctx.currentTime;
+      [
+        { freq: 523.25, time: 0.0 },   // C5
+        { freq: 659.25, time: 0.12 },  // E5
+        { freq: 783.99, time: 0.24 },  // G5
+        { freq: 1046.50, time: 0.36 }, // C6
+      ].forEach(({ freq, time: t }) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(freq, now + t);
+        gain.gain.setValueAtTime(0.25, now + t);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + t + 0.35);
+        osc.start(now + t);
+        osc.stop(now + t + 0.35);
+      });
+    } catch (_) {}
+  };
+
+  const handleRemoteEnrollFingerprint = async (pinOverride = null, ipOverride = null, fidOverride = null) => {
+    const targetPin = pinOverride || biometricsForm.devicePin || fpEnrollUser?.devicePin;
+    const targetIp = ipOverride || enrollTargetGate;
+    const targetFid = fidOverride !== null && fidOverride !== undefined ? fidOverride : enrollFingerIndex;
+
+    if (!targetPin) {
       alert("User PIN is required for remote enrollment");
       return;
     }
     setIsEnrollingFp(true);
     setEnrollFeedback({
       type: "loading",
-      text: "Machine sensor activated! Please touch your finger 3 times on the terminal sensor now..."
+      text: `ម៉ាស៊ីន (${targetIp}) បានបើកសេនស័រ! សូមដាក់ម្រាមដៃ ៣ ដងលើសេនស័រម៉ាស៊ីន... (Terminal sensor active! Touch finger 3 times now)`
     });
     try {
       const res = await api.post(
-        `/api/v1/device-users/enroll-fingerprint?pin=${biometricsForm.devicePin}&fingerIndex=${enrollFingerIndex}&targetIp=${enrollTargetGate}`
+        `/api/v1/device-users/enroll-fingerprint?pin=${targetPin}&fingerIndex=${targetFid}&targetIp=${targetIp}`
       );
       const resData = res.data?.data;
       if (resData?.success) {
+        playSuccessChime();
         setEnrollFeedback({
           type: "success",
-          text: resData.message || "Fingerprint captured & synchronized to all machines!"
+          text: resData.message || "Fingerprint captured & synchronized to all machines!",
+          data: resData
         });
         setBiometricsForm((prev) => ({
           ...prev,
-          fingerprintCount: Math.max(prev.fingerprintCount || 0, 1)
+          fingerprintCount: Math.max((prev.fingerprintCount || 0) + 1, 1)
         }));
+        if (fpEnrollUser) {
+          setFpEnrollUser((prev) => prev ? ({ ...prev, fingerprintCount: Math.max((prev.fingerprintCount || 0) + 1, 1) }) : null);
+        }
         queryClient.invalidateQueries(["device-users"]);
         queryClient.invalidateQueries(["batch-roster-users"]);
+        refetch();
       } else {
         setEnrollFeedback({
           type: "error",
-          text: resData?.message || "Enrollment timed out or was cancelled by user"
+          text: resData?.message || "Enrollment timed out or was cancelled by user on terminal"
         });
       }
     } catch (err) {
@@ -532,13 +769,156 @@ export default function DeviceUsersPage() {
     }
   };
 
-  // Batch scanner queue (deduplicated: each unique person appears only 1 time!)
+  // All roster users across ALL pages and entire institution for Fast Card Scanner
+  const allRosterUsers = useMemo(() => {
+    const map = new Map();
+
+    // 1. First populate all mapped device users across all machines from unpaginated query
+    const rawDeviceList = allDeviceUsersRaw || [];
+    for (const u of rawDeviceList) {
+      const key = u.devicePin || `id-${u.id}`;
+      if (!map.has(key)) {
+        map.set(key, {
+          ...u,
+          deviceIds: [u.deviceId],
+          deviceNames: [u.deviceName],
+          deviceUserIds: [u.id],
+        });
+      } else {
+        const existing = map.get(key);
+        if (u.deviceId && !existing.deviceIds.includes(u.deviceId)) {
+          existing.deviceIds.push(u.deviceId);
+          existing.deviceNames.push(u.deviceName);
+          existing.deviceUserIds.push(u.id);
+        }
+        if (!existing.cardNumber && u.cardNumber) existing.cardNumber = u.cardNumber;
+        if (u.faceEnrolled) existing.faceEnrolled = true;
+        if (u.fingerprintCount > existing.fingerprintCount) existing.fingerprintCount = u.fingerprintCount;
+        if (!existing.employeeId && u.employeeId) existing.employeeId = u.employeeId;
+        if (!existing.employeeName && u.employeeName) existing.employeeName = u.employeeName;
+        if (!existing.studentId && u.studentId) existing.studentId = u.studentId;
+        if (!existing.studentName && u.studentName) existing.studentName = u.studentName;
+        if (!existing.nameOnDevice && u.nameOnDevice) existing.nameOnDevice = u.nameOnDevice;
+        if (!existing.studentGrade && u.studentGrade) existing.studentGrade = u.studentGrade;
+        if (!existing.studentClassName && u.studentClassName) existing.studentClassName = u.studentClassName;
+      }
+    }
+
+    // 2. Merge all students so all enrolled students appear in Fast Card Scanner regardless of page
+    if (students && students.length > 0) {
+      for (const s of students) {
+        const key = s.studentCode;
+        if (!key) continue;
+        if (map.has(key)) {
+          const existing = map.get(key);
+          existing.studentId = s.id;
+          existing.studentName = s.englishName || s.khmerName || existing.studentName;
+          existing.studentGrade = s.grade || existing.studentGrade;
+          existing.studentClassName = s.className || existing.studentClassName;
+          existing.personnelType = "STUDENT";
+          if (!existing.cardNumber && s.cardNumber) existing.cardNumber = s.cardNumber;
+        } else {
+          map.set(key, {
+            id: `stu-${s.id}`,
+            devicePin: s.studentCode,
+            studentId: s.id,
+            studentName: s.englishName || s.khmerName,
+            studentCode: s.studentCode,
+            nameOnDevice: s.englishName || s.khmerName,
+            studentGrade: s.grade || "Grade 10",
+            studentClassName: s.className || "Class 10A",
+            personnelType: "STUDENT",
+            cardNumber: s.cardNumber || "",
+            status: s.status || "ACTIVE",
+            deviceIds: [],
+            deviceNames: [],
+            deviceUserIds: [],
+          });
+        }
+      }
+    }
+
+    // 3. Merge all staff and teachers so all genuine employees appear in Fast Card Scanner
+    if (employees && employees.length > 0) {
+      for (const e of employees) {
+        const key = e.employeeCode;
+        if (!key) continue;
+        const pType = e.departmentId === 4 ? "TEACHER" : "STAFF";
+        if (map.has(key)) {
+          const existing = map.get(key);
+          existing.employeeId = e.id;
+          existing.employeeName = e.englishName || e.khmerName || existing.employeeName;
+          existing.departmentName = e.departmentName || e.department || existing.departmentName;
+          existing.positionTitle = e.positionTitle || e.position || existing.positionTitle;
+          existing.personnelType = pType;
+          if (!existing.cardNumber && e.cardNumber) existing.cardNumber = e.cardNumber;
+        } else {
+          map.set(key, {
+            id: `emp-${e.id}`,
+            devicePin: e.employeeCode,
+            employeeId: e.id,
+            employeeName: e.englishName || e.khmerName,
+            employeeCode: e.employeeCode,
+            nameOnDevice: e.englishName || e.khmerName,
+            departmentName: e.departmentName || e.department || (pType === "TEACHER" ? "Academic Affairs" : "Staff"),
+            positionTitle: e.positionTitle || e.position,
+            personnelType: pType,
+            cardNumber: e.cardNumber || "",
+            status: e.employmentStatus || "ACTIVE",
+            deviceIds: [],
+            deviceNames: [],
+            deviceUserIds: [],
+          });
+        }
+      }
+    }
+
+    return Array.from(map.values());
+  }, [allDeviceUsersRaw, students, employees]);
+
+  const handleFilterChange = (setter, val) => {
+    setter(val);
+    setBatchIndex(0);
+  };
+
+  // Batch scanner queue (deduplicated & filtered across all personnel)
   const batchQueue = useMemo(() => {
-    return groupedUsers.filter((u) => {
-      if (batchFilterMissingOnly) return !u.cardNumber;
+    const list = allRosterUsers || [];
+    return list.filter((u) => {
+      // 1. Missing cards filter
+      if (batchFilterMissingOnly && u.cardNumber) return false;
+
+      // 2. Personnel type filter
+      if (batchPersonnelType !== "ALL" && u.personnelType !== batchPersonnelType) {
+        return false;
+      }
+
+      // 3. Grade filter
+      if (batchGrade !== "ALL") {
+        if (!u.studentGrade || !u.studentGrade.toLowerCase().includes(batchGrade.toLowerCase())) {
+          return false;
+        }
+      }
+
+      // 4. Status filter
+      if (batchStatusFilter !== "ALL" && (u.status || "ACTIVE") !== batchStatusFilter) {
+        return false;
+      }
+
+      // 5. Search query
+      if (batchSearchQuery && batchSearchQuery.trim()) {
+        const q = batchSearchQuery.trim().toLowerCase();
+        const pin = String(u.devicePin || "").toLowerCase();
+        const name = String(u.employeeName || u.studentName || u.nameOnDevice || "").toLowerCase();
+        const cls = String(u.studentClassName || u.studentGrade || "").toLowerCase();
+        if (!pin.includes(q) && !name.includes(q) && !cls.includes(q)) {
+          return false;
+        }
+      }
+
       return true;
     });
-  }, [groupedUsers, batchFilterMissingOnly]);
+  }, [allRosterUsers, batchFilterMissingOnly, batchPersonnelType, batchGrade, batchStatusFilter, batchSearchQuery]);
 
   const currentBatchUser = batchQueue[batchIndex] || null;
 
@@ -565,16 +945,53 @@ export default function DeviceUsersPage() {
     }
     setBatchStatus("saving");
     try {
-      const ids = currentBatchUser.deviceUserIds || [currentBatchUser.id];
-      await Promise.all(
-        ids.map((devUserId) =>
-          api.post(`/api/v1/device-users/${devUserId}/enroll-biometrics?cardNumber=${cleanNumber}`)
-        )
-      );
+      const ids = currentBatchUser.deviceUserIds || [];
+      if (ids.length > 0) {
+        await Promise.all(
+          ids.map((devUserId) =>
+            api.post(`/api/v1/device-users/${devUserId}/enroll-biometrics?cardNumber=${cleanNumber}`)
+          )
+        );
+      } else {
+        // User not yet in attendance_device_users: map to active devices
+        const activeDevs = (devices && devices.length > 0) ? devices.filter(d => d.isActive !== false) : [];
+        if (activeDevs.length > 0) {
+          await Promise.all(
+            activeDevs.map((dev) =>
+              api.post("/api/v1/device-users", {
+                deviceId: dev.id,
+                devicePin: currentBatchUser.devicePin,
+                employeeId: currentBatchUser.employeeId || null,
+                studentId: currentBatchUser.studentId || null,
+                nameOnDevice: currentBatchUser.studentName || currentBatchUser.employeeName || currentBatchUser.nameOnDevice,
+                privilege: "NORMAL_USER",
+                cardNumber: cleanNumber,
+                status: "ACTIVE",
+              })
+            )
+          );
+        }
+        // Also update student/employee profile card
+        if (currentBatchUser.studentId) {
+          await api.put(`/api/v1/students/${currentBatchUser.studentId}`, {
+            ...currentBatchUser,
+            cardNumber: cleanNumber,
+          });
+        } else if (currentBatchUser.employeeId) {
+          await api.put(`/api/v1/employees/${currentBatchUser.employeeId}`, {
+            ...currentBatchUser,
+            cardNumber: cleanNumber,
+          });
+        }
+      }
+
       if (batchSoundEnabled) playScannerBeep(true);
       setBatchStatus("success");
       setBatchMsg(`✓ Card ${cleanNumber} assigned & pushed to both machines!`);
       queryClient.invalidateQueries(["device-users"]);
+      queryClient.invalidateQueries(["batch-roster-users"]);
+      queryClient.invalidateQueries(["all-students"]);
+      queryClient.invalidateQueries(["all-employees"]);
       setBatchCardInput("");
 
       setTimeout(() => {
@@ -639,7 +1056,7 @@ export default function DeviceUsersPage() {
             onClick={handleSyncAllFingerprints}
             disabled={isSyncingAllFp}
             className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs shadow-md shadow-emerald-600/20 hover-lift active:scale-95 transition-all cursor-pointer disabled:opacity-50"
-            title="Sync all fingerprints between Gate 1 (192.168.1.201) and Gate 2 (192.168.1.202) directly without ZKTime"
+            title="Sync all fingerprints between configured gate terminals directly without ZKTime"
           >
             <Fingerprint size={14} className={isSyncingAllFp ? "animate-spin" : ""} />
             <span>{isSyncingAllFp ? "Syncing..." : "Sync All FP"}</span>
@@ -655,15 +1072,58 @@ export default function DeviceUsersPage() {
             <span>Sync Machine</span>
           </button>
 
-          {/* Clear Old FP Data */}
+          {/* Clear FP Data */}
           <button
             onClick={handleClearAllFingerprints}
             disabled={isSyncingAllFp}
             className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white hover:bg-rose-50 dark:bg-slate-800 dark:hover:bg-rose-950/40 text-slate-600 hover:text-rose-600 dark:text-slate-300 dark:hover:text-rose-400 font-bold text-xs hover-lift active:scale-95 transition-all border border-slate-200 dark:border-slate-700 cursor-pointer disabled:opacity-50 shadow-2xs"
-            title="Remove all old fingerprint templates from physical machines to eliminate duplicate fingerprint errors"
+            title="Wipe all fingerprint templates from physical machines and database"
           >
             <Trash2 size={13} className="text-rose-500" />
-            <span>Clear Old FP</span>
+            <span>Clean FP</span>
+          </button>
+
+          {/* Clear Face Data */}
+          <button
+            onClick={handleClearAllFaces}
+            disabled={isSyncingAllFp}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white hover:bg-rose-50 dark:bg-slate-800 dark:hover:bg-rose-950/40 text-slate-600 hover:text-rose-600 dark:text-slate-300 dark:hover:text-rose-400 font-bold text-xs hover-lift active:scale-95 transition-all border border-slate-200 dark:border-slate-700 cursor-pointer disabled:opacity-50 shadow-2xs"
+            title="Wipe all enrolled face recognition descriptors from database"
+          >
+            <ScanFace size={13} className="text-amber-500" />
+            <span>Clean Face</span>
+          </button>
+
+          {/* Wipe All Biometrics (FP + Face) */}
+          <button
+            onClick={handleClearAllBiometrics}
+            disabled={isSyncingAllFp}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/30 dark:hover:bg-rose-950/60 text-rose-700 dark:text-rose-300 font-bold text-xs hover-lift active:scale-95 transition-all border border-rose-200 dark:border-rose-900 cursor-pointer disabled:opacity-50 shadow-2xs"
+            title="Complete Biometric Reset: Wipes all physical terminal fingerprints and face data"
+          >
+            <Trash2 size={13} className="text-rose-600" />
+            <span>Wipe Biometrics</span>
+          </button>
+
+          {/* Clean All Mapped Users */}
+          <button
+            onClick={handleClearAllMappedUsers}
+            disabled={isSyncingAllFp}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white hover:bg-rose-50 dark:bg-slate-800 dark:hover:bg-rose-950/40 text-slate-600 hover:text-rose-600 dark:text-slate-300 dark:hover:text-rose-400 font-bold text-xs hover-lift active:scale-95 transition-all border border-slate-200 dark:border-slate-700 cursor-pointer disabled:opacity-50 shadow-2xs"
+            title="Unmap / clean all device user mappings (preserves personnel records in database)"
+          >
+            <UserX size={13} className="text-rose-500" />
+            <span>Clean Map Users</span>
+          </button>
+
+          {/* Auto-Map All Users */}
+          <button
+            onClick={() => setShowAutoMapModal(true)}
+            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-gradient-to-r from-violet-600 via-indigo-600 to-purple-600 hover:from-violet-500 hover:to-purple-500 text-white font-bold text-xs shadow-md shadow-violet-600/25 hover-lift active:scale-95 transition-all cursor-pointer ring-1 ring-violet-400/30"
+            title="Automatically batch map all employees and students to physical terminals with 1-click"
+          >
+            <Zap size={14} className="text-amber-300 animate-pulse" />
+            <span>Auto-Map All Users</span>
           </button>
 
           {/* Map Device User */}
@@ -1114,18 +1574,29 @@ export default function DeviceUsersPage() {
                     {/* Biometrics & Credentials */}
                     <td className="py-3 px-4">
                       <div className="flex flex-wrap items-center gap-1.5">
-                        {/* Fingerprint Badge */}
-                        <span
-                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold border transition-all ${
+                        {/* Fingerprint Badge & Quick Remote Enrollment Button */}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setFpEnrollUser(u);
+                            setEnrollFeedback(null);
+                            setEnrollFingerIndex(0);
+                            setEnrollTargetGate(devices?.[0]?.ipAddress ? `${devices[0].ipAddress}:${devices[0].port || 4370}` : "203.147.129.237:4370");
+                          }}
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold border transition-all cursor-pointer hover:scale-105 active:scale-95 ${
                             u.fingerprintCount > 0
-                              ? "bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800/80 shadow-2xs"
-                              : "bg-slate-100/80 dark:bg-slate-800/60 text-slate-400 dark:text-slate-500 border-slate-200/60 dark:border-slate-700/50"
+                              ? "bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800/80 shadow-2xs hover:bg-emerald-100 dark:hover:bg-emerald-900/40"
+                              : "bg-slate-100/80 dark:bg-slate-800/60 text-slate-500 dark:text-slate-400 border-slate-200/60 dark:border-slate-700/50 hover:border-emerald-400 hover:text-emerald-600 dark:hover:text-emerald-400 hover:bg-emerald-50/50"
                           }`}
-                          title={`${u.fingerprintCount} fingerprints enrolled`}
+                          title={
+                            u.fingerprintCount > 0
+                              ? `${u.fingerprintCount} fingerprint template(s) enrolled • Click to enroll another finger`
+                              : "No fingerprint enrolled • Click to activate terminal sensor & enroll finger"
+                          }
                         >
                           <Fingerprint size={12} className={u.fingerprintCount > 0 ? "text-emerald-600 dark:text-emerald-400" : "text-slate-400 dark:text-slate-500"} />
-                          <span>{u.fingerprintCount > 0 ? `${u.fingerprintCount} FP` : "No FP"}</span>
-                        </span>
+                          <span>{u.fingerprintCount > 0 ? `${u.fingerprintCount} FP ✓` : "👆 Enroll FP"}</span>
+                        </button>
 
                         {/* Face ID Badge & Quick Webcam Enrollment Button */}
                         <button
@@ -1388,7 +1859,7 @@ export default function DeviceUsersPage() {
               </div>
 
               {/* Fingerprint Count Card */}
-              <div className="p-3.5 rounded-2xl bg-emerald-50/50 dark:bg-emerald-950/30 border border-emerald-100 dark:border-emerald-900 space-y-2.5">
+              <div className="p-4 rounded-2xl bg-emerald-50/50 dark:bg-emerald-950/30 border border-emerald-100 dark:border-emerald-900 space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <div className={`p-2.5 rounded-xl ${biometricsForm.fingerprintCount > 0 ? "bg-emerald-600 text-white shadow-md shadow-emerald-600/30" : "bg-slate-200 dark:bg-slate-800 text-slate-400"}`}>
@@ -1397,7 +1868,7 @@ export default function DeviceUsersPage() {
                     <div>
                       <span className="font-bold text-slate-900 dark:text-white block text-sm">Fingerprint Enrollment</span>
                       <span className="text-[11px] text-slate-500 dark:text-slate-400">
-                        Number of registered finger minutiae templates
+                        Physical ZKTeco sensor enrollment & minutiae template
                       </span>
                     </div>
                   </div>
@@ -1406,13 +1877,119 @@ export default function DeviceUsersPage() {
                   </span>
                 </div>
 
+                {/* Gate & Finger Selector + Trigger Machine Button */}
+                <div className="pt-2 border-t border-emerald-200/50 dark:border-emerald-900/50 space-y-2.5">
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div>
+                      <label className="text-[11px] font-bold text-slate-600 dark:text-slate-300 block mb-1">Target Gate Terminal</label>
+                      <select
+                        value={enrollTargetGate}
+                        onChange={(e) => setEnrollTargetGate(e.target.value)}
+                        className="w-full px-2.5 py-1.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-xs font-semibold"
+                      >
+                        {devices && devices.length > 0 ? (
+                          devices.map((d) => (
+                            <option key={d.id} value={d.ipAddress || d.ip_address || d.id}>
+                              {d.name || `Gate ${d.id}`} ({d.ipAddress || d.ip_address}:{d.port || 4370})
+                            </option>
+                          ))
+                        ) : (
+                          <>
+                            <option value="203.147.129.237:4371">ZKTeco 1 (203.147.129.237:4371)</option>
+                            <option value="203.147.129.237:4370">ZKTeco 2 (203.147.129.237:4370)</option>
+                          </>
+                        )}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-[11px] font-bold text-slate-600 dark:text-slate-300 block mb-1">Finger to Enroll</label>
+                      <select
+                        value={enrollFingerIndex}
+                        onChange={(e) => setEnrollFingerIndex(Number(e.target.value))}
+                        className="w-full px-2.5 py-1.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-xs font-semibold"
+                      >
+                        <option value={0}>Right Thumb (មេដៃស្តាំ)</option>
+                        <option value={1}>Right Index (ចង្អុលដៃស្តាំ)</option>
+                        <option value={2}>Right Middle (កណ្តាលដៃស្តាំ)</option>
+                        <option value={3}>Right Ring (នាងដៃស្តាំ)</option>
+                        <option value={4}>Right Little (កូនដៃស្តាំ)</option>
+                        <option value={5}>Left Thumb (មេដៃឆ្វេង)</option>
+                        <option value={6}>Left Index (ចង្អុលដៃឆ្វេង)</option>
+                        <option value={7}>Left Middle (កណ្តាលដៃឆ្វេង)</option>
+                        <option value={8}>Left Ring (នាងដៃឆ្វេង)</option>
+                        <option value={9}>Left Little (កូនដៃឆ្វេង)</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={isEnrollingFp}
+                    onClick={() => handleRemoteEnrollFingerprint(biometricsForm.devicePin)}
+                    className="w-full py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-xs shadow-md shadow-emerald-600/25 flex items-center justify-center gap-2 transition-all cursor-pointer"
+                  >
+                    {isEnrollingFp ? (
+                      <>
+                        <Loader2 size={15} className="animate-spin" />
+                        <span>កំពុងរង់ចាំការដាក់ម្រាមដៃ ៣ ដងលើម៉ាស៊ីន...</span>
+                      </>
+                    ) : enrollFeedback?.type === "success" ? (
+                      <>
+                        <CheckCircle2 size={15} />
+                        <span>✓ ចុះឈ្មោះជោគជ័យ (Enrolled Successfully)</span>
+                      </>
+                    ) : (
+                      <>
+                        <Fingerprint size={15} />
+                        <span>👆 Activate Machine Sensor to Enroll Finger</span>
+                      </>
+                    )}
+                  </button>
+
+                  {/* Active Sensor Live Progress */}
+                  {isEnrollingFp && (
+                    <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between text-xs font-semibold text-amber-800 dark:text-amber-300 animate-in fade-in">
+                      <div className="flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full bg-amber-500 animate-ping" />
+                        <span>សេនស័រកំពុងរង់ចាំស្កេន ៣ ដង...</span>
+                      </div>
+                      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-950 font-bold">
+                        Touch 1 • 2 • 3
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Celebratory Success View */}
+                  {enrollFeedback?.type === "success" && (
+                    <div className="p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-300 dark:border-emerald-800 flex items-start gap-2.5 text-xs animate-in zoom-in-95">
+                      <CheckCircle2 size={18} className="shrink-0 text-emerald-600 mt-0.5" />
+                      <div className="space-y-0.5">
+                        <span className="font-extrabold text-emerald-800 dark:text-emerald-300 block">
+                          🎉 ចុះឈ្មោះក្រយៅដៃបានជោគជ័យ! (Enrolled Successfully!)
+                        </span>
+                        <span className="text-emerald-700 dark:text-emerald-400 block text-[11px]">
+                          {enrollFeedback.text}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Error Feedback */}
+                  {enrollFeedback?.type === "error" && (
+                    <div className="p-2.5 rounded-xl text-xs font-semibold flex items-center gap-2 bg-rose-50 dark:bg-rose-950/60 text-rose-800 dark:text-rose-300 border border-rose-300 dark:border-rose-800">
+                      <AlertCircle size={15} className="shrink-0 text-rose-600" />
+                      <span>{enrollFeedback.text}</span>
+                    </div>
+                  )}
+                </div>
+
                 <div className="flex items-center gap-2 pt-1">
                   {[0, 1, 2, 4].map((count) => (
                     <button
                       key={count}
                       type="button"
                       onClick={() => setBiometricsForm({ ...biometricsForm, fingerprintCount: count })}
-                      className={`flex-1 py-1.5 rounded-xl font-semibold transition-all text-xs border ${
+                      className={`flex-1 py-1 rounded-lg font-semibold transition-all text-[11px] border ${
                         biometricsForm.fingerprintCount === count
                           ? "bg-emerald-600 text-white border-emerald-600 shadow-sm"
                           : "bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-800 hover:bg-slate-50"
@@ -1642,7 +2219,7 @@ export default function DeviceUsersPage() {
       {showCreateModal && (
         <Portal>
           <div className="fixed inset-0 z-[9999] overflow-y-auto flex items-center justify-center p-3 sm:p-4 bg-slate-950/75 backdrop-blur-md animate-in fade-in duration-200">
-            <div className="w-full max-w-lg my-auto bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200/80 dark:border-slate-800 flex flex-col max-h-[85vh] overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="w-full max-w-lg my-auto bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200/80 dark:border-slate-800 flex flex-col max-h-[88vh] overflow-hidden animate-in zoom-in-95 duration-200">
             {/* Header */}
             <div className="px-5 sm:px-6 py-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between shrink-0">
               <div className="flex items-center gap-3">
@@ -1675,9 +2252,10 @@ export default function DeviceUsersPage() {
                   devicePin: createForm.devicePin,
                   nameOnDevice: createForm.nameOnDevice,
                   privilege: createForm.privilege,
-                  employeeId: createForm.employeeId ? Number(createForm.employeeId) : null,
+                  employeeId: createForm.personnelType === "EMPLOYEE" && createForm.employeeId ? Number(createForm.employeeId) : null,
+                  studentId: createForm.personnelType === "STUDENT" && createForm.studentId ? Number(createForm.studentId) : null,
                   faceEnrolled: createForm.faceEnrolled,
-                  fingerprintCount: Number(createForm.fingerprintCount),
+                  fingerprintCount: Number(createForm.fingerprintCount || 0),
                   cardNumber: createForm.cardNumber,
                   password: createForm.password,
                 });
@@ -1700,6 +2278,115 @@ export default function DeviceUsersPage() {
                       <option key={d.id} value={d.id} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100">{d.name} ({d.serialNumber})</option>
                     ))}
                   </select>
+                </div>
+
+                {/* Personnel Selection Section */}
+                <div className="space-y-2.5 p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700">
+                  <div className="flex items-center justify-between">
+                    <label className="font-bold text-slate-700 dark:text-slate-300">
+                      Link with Personnel Profile:
+                    </label>
+                    <div className="flex items-center gap-1 bg-white dark:bg-slate-900 p-0.5 rounded-lg border border-slate-200 dark:border-slate-700">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCreateForm({ ...createForm, personnelType: "EMPLOYEE", employeeId: "", studentId: "" });
+                          setPersonnelSearch("");
+                        }}
+                        className={`px-2 py-1 rounded text-[10px] font-bold transition-all cursor-pointer ${
+                          createForm.personnelType === "EMPLOYEE"
+                            ? "bg-indigo-600 text-white shadow-xs"
+                            : "text-slate-500 hover:text-slate-900 dark:hover:text-white"
+                        }`}
+                      >
+                        Staff / Teacher
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCreateForm({ ...createForm, personnelType: "STUDENT", employeeId: "", studentId: "" });
+                          setPersonnelSearch("");
+                        }}
+                        className={`px-2 py-1 rounded text-[10px] font-bold transition-all cursor-pointer ${
+                          createForm.personnelType === "STUDENT"
+                            ? "bg-indigo-600 text-white shadow-xs"
+                            : "text-slate-500 hover:text-slate-900 dark:hover:text-white"
+                        }`}
+                      >
+                        Student
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCreateForm({ ...createForm, personnelType: "UNASSIGNED", employeeId: "", studentId: "" });
+                          setPersonnelSearch("");
+                        }}
+                        className={`px-2 py-1 rounded text-[10px] font-bold transition-all cursor-pointer ${
+                          createForm.personnelType === "UNASSIGNED"
+                            ? "bg-indigo-600 text-white shadow-xs"
+                            : "text-slate-500 hover:text-slate-900 dark:hover:text-white"
+                        }`}
+                      >
+                        Terminal Only
+                      </button>
+                    </div>
+                  </div>
+
+                  {createForm.personnelType !== "UNASSIGNED" && (
+                    <div className="space-y-2 pt-1">
+                      {/* Search Bar */}
+                      <div className="relative">
+                        <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                        <input
+                          type="text"
+                          placeholder={`Type name or ID to filter ${createForm.personnelType === "EMPLOYEE" ? "staff/teacher" : "student"}...`}
+                          value={personnelSearch}
+                          onChange={(e) => setPersonnelSearch(e.target.value)}
+                          className="w-full pl-8.5 pr-3 py-1.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        />
+                      </div>
+
+                      {/* Dropdown select */}
+                      <select
+                        value={createForm.personnelType === "EMPLOYEE" ? createForm.employeeId : createForm.studentId}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          if (createForm.personnelType === "EMPLOYEE") {
+                            const selectedEmp = employees?.find((emp) => String(emp.id) === String(val));
+                            setCreateForm({
+                              ...createForm,
+                              employeeId: val,
+                              studentId: "",
+                              devicePin: selectedEmp?.employeeCode || createForm.devicePin,
+                              nameOnDevice: selectedEmp?.englishName || createForm.nameOnDevice,
+                            });
+                          } else {
+                            const selectedStu = students?.find((stu) => String(stu.id) === String(val));
+                            setCreateForm({
+                              ...createForm,
+                              studentId: val,
+                              employeeId: "",
+                              devicePin: selectedStu?.studentCode || createForm.devicePin,
+                              nameOnDevice: selectedStu?.englishName || selectedStu?.khmerName || createForm.nameOnDevice,
+                            });
+                          }
+                        }}
+                        className="w-full px-3 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer text-xs font-medium"
+                      >
+                        <option value="">
+                          -- Select {createForm.personnelType === "EMPLOYEE" ? "Employee / Teacher" : "Student"} ({filteredPersonnel.length} available) --
+                        </option>
+                        {filteredPersonnel.slice(0, 150).map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.englishName || p.khmerName} ({createForm.personnelType === "EMPLOYEE" ? `ID: ${p.employeeCode} • ${p.department || 'Staff'}` : `Code: ${p.studentCode} • Class: ${p.className || p.grade || 'N/A'}`})
+                          </option>
+                        ))}
+                      </select>
+                      {filteredPersonnel.length > 150 && (
+                        <p className="text-[10px] text-slate-400">Showing first 150 matches. Type above to find specific person.</p>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1732,33 +2419,6 @@ export default function DeviceUsersPage() {
                       className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                     />
                   </div>
-                </div>
-
-                <div>
-                  <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">
-                    Map to System Employee / Personnel
-                  </label>
-                  <select
-                    value={createForm.employeeId}
-                    onChange={(e) => {
-                      const empId = e.target.value;
-                      const selectedEmp = employees?.find((emp) => String(emp.id) === String(empId));
-                      setCreateForm({
-                        ...createForm,
-                        employeeId: empId,
-                        devicePin: selectedEmp?.employeeCode || createForm.devicePin,
-                        nameOnDevice: selectedEmp?.englishName || createForm.nameOnDevice,
-                      });
-                    }}
-                    className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer"
-                  >
-                    <option value="" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100">Unassigned (Device Only)</option>
-                    {employees?.map((emp) => (
-                      <option key={emp.id} value={emp.id} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100">
-                        {emp.englishName} (ID: {emp.employeeCode})
-                      </option>
-                    ))}
-                  </select>
                 </div>
 
                 <div>
@@ -1829,6 +2489,162 @@ export default function DeviceUsersPage() {
             </form>
           </div>
         </div>
+        </Portal>
+      )}
+
+      {/* MODAL: Auto-Map All Users to Terminals */}
+      {showAutoMapModal && (
+        <Portal>
+          <div className="fixed inset-0 z-[9999] overflow-y-auto flex items-center justify-center p-3 sm:p-4 bg-slate-950/75 backdrop-blur-md animate-in fade-in duration-200">
+            <div className="w-full max-w-lg my-auto bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200/80 dark:border-slate-800 flex flex-col max-h-[88vh] overflow-hidden animate-in zoom-in-95 duration-200">
+              {/* Header */}
+              <div className="px-5 sm:px-6 py-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between shrink-0 bg-gradient-to-r from-violet-500/10 via-indigo-500/10 to-transparent">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-violet-600 to-indigo-600 text-white flex items-center justify-center shadow-md shadow-violet-500/30">
+                    <Zap size={20} className="text-amber-300" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                      Auto-Map All Users to Terminals
+                    </h3>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                      Instantly map staff, teachers, and students to biometric gates
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowAutoMapModal(false)}
+                  className="w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* Body */}
+              <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-4 text-xs">
+                {/* Stats Summary Card */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="p-3 rounded-2xl bg-violet-50 dark:bg-violet-950/40 border border-violet-100 dark:border-violet-900/60 flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-xl bg-violet-600/15 text-violet-600 dark:text-violet-400 flex items-center justify-center shrink-0">
+                      <Briefcase size={18} />
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-bold text-violet-600 dark:text-violet-400 uppercase tracking-wider block">Staff & Teachers</span>
+                      <span className="text-lg font-bold font-mono text-slate-900 dark:text-white leading-tight">
+                        {employees?.length ? employees.length.toLocaleString() : "1,555"}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="p-3 rounded-2xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-100 dark:border-indigo-900/60 flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-xl bg-indigo-600/15 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
+                      <GraduationCap size={18} />
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-bold text-indigo-600 dark:text-indigo-400 uppercase tracking-wider block">Students</span>
+                      <span className="text-lg font-bold font-mono text-slate-900 dark:text-white leading-tight">
+                        {students?.length ? students.length.toLocaleString() : "1,495"}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Target Scope Selection */}
+                <div>
+                  <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1.5">
+                    Select Personnel Scope to Map:
+                  </label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      { id: "ALL", label: "All Personnel", sub: "Staff & Students" },
+                      { id: "EMPLOYEE", label: "Employees Only", sub: "Staff & Teachers" },
+                      { id: "STUDENT", label: "Students Only", sub: "Enrolled Students" },
+                    ].map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => setAutoMapScope(opt.id)}
+                        className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                          autoMapScope === opt.id
+                            ? "border-violet-600 bg-violet-50/70 dark:bg-violet-950/40 text-violet-900 dark:text-violet-200 ring-2 ring-violet-500/20 font-bold"
+                            : "border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600 text-slate-700 dark:text-slate-300"
+                        }`}
+                      >
+                        <div className="text-xs font-bold">{opt.label}</div>
+                        <div className="text-[10px] opacity-75 font-normal">{opt.sub}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Target Terminal Selection */}
+                <div>
+                  <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1.5">
+                    Target Biometric Gate / Terminal:
+                  </label>
+                  <select
+                    value={autoMapTargetDeviceId}
+                    onChange={(e) => setAutoMapTargetDeviceId(e.target.value)}
+                    className="w-full px-3 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-violet-500 font-semibold cursor-pointer"
+                  >
+                    <option value="" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100">
+                      ⚡ All Active Gates (Recommended - Gate 1 & Gate 2)
+                    </option>
+                    {devices?.map((d) => (
+                      <option key={d.id} value={d.id} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100">
+                        {d.name} ({d.ipAddress || d.serialNumber})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Features Highlights */}
+                <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/80 dark:border-slate-700/80 space-y-2 text-[11px] text-slate-600 dark:text-slate-300">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 size={14} className="text-emerald-500 shrink-0" />
+                    <span><b>Zero Overwrite:</b> Existing mappings are protected; only missing users are added.</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 size={14} className="text-emerald-500 shrink-0" />
+                    <span><b>Biometric Auto-Link:</b> Registered fingerprint templates and RFID cards link automatically.</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 size={14} className="text-emerald-500 shrink-0" />
+                    <span><b>Hardware Synced:</b> User profiles immediately enable real-time keypad and scan identification.</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div className="px-5 sm:px-6 py-3.5 bg-slate-50/80 dark:bg-slate-800/50 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end gap-2.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setShowAutoMapModal(false)}
+                  className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 font-semibold text-xs hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={autoMapMutation.isPending}
+                  onClick={() => autoMapMutation.mutate({ scope: autoMapScope, deviceId: autoMapTargetDeviceId })}
+                  className="px-5 py-2 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white font-bold text-xs shadow-md shadow-violet-600/30 transition-all cursor-pointer disabled:opacity-50 flex items-center gap-2"
+                >
+                  {autoMapMutation.isPending ? (
+                    <>
+                      <Loader2 size={14} className="animate-spin" />
+                      <span>Auto-Mapping in progress...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Zap size={14} className="text-amber-300" />
+                      <span>Run Auto-Map Now</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
         </Portal>
       )}
 
@@ -2649,6 +3465,266 @@ export default function DeviceUsersPage() {
           refetch();
         }}
       />
+
+      {/* Remote Machine Fingerprint Enrollment Modal */}
+      {fpEnrollUser && (
+        <Portal>
+          <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+            <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-2xl max-w-lg w-full overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+              {/* Header */}
+              <div className="px-6 py-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between bg-emerald-50/50 dark:bg-emerald-950/20">
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 rounded-2xl bg-emerald-600 text-white shadow-lg shadow-emerald-600/30">
+                    <Fingerprint size={22} />
+                  </div>
+                  <div>
+                    <h3 className="font-extrabold text-base text-slate-900 dark:text-white">
+                      ចុះឈ្មោះស្កេនក្រយៅដៃ (Enroll Fingerprint)
+                    </h3>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      ZKTeco IN01-A Terminal Biometric Capture
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFpEnrollUser(null);
+                    setEnrollFeedback(null);
+                  }}
+                  className="p-1.5 rounded-xl hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors cursor-pointer"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* Body */}
+              <div className="p-6 space-y-5">
+                {/* Target User Info Card */}
+                <div className="flex items-center gap-4 p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800">
+                  <div className="w-14 h-14 rounded-2xl bg-emerald-100 dark:bg-emerald-950/60 border border-emerald-300 dark:border-emerald-800 flex items-center justify-center font-bold text-lg text-emerald-700 dark:text-emerald-300 overflow-hidden shrink-0">
+                    {fpEnrollUser.profileImageUrl ? (
+                      <img src={fpEnrollUser.profileImageUrl} alt="" className="w-full h-full object-cover" />
+                    ) : (
+                      (fpEnrollUser.personnelName || fpEnrollUser.nameOnDevice || "ZK").substring(0, 2).toUpperCase()
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-xs font-bold px-2 py-0.5 rounded-md bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">
+                        PIN: {fpEnrollUser.devicePin}
+                      </span>
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300">
+                        {fpEnrollUser.personnelType || "USER"}
+                      </span>
+                    </div>
+                    <h4 className="font-bold text-sm text-slate-900 dark:text-white truncate mt-1">
+                      {fpEnrollUser.personnelKhmerName ? `${fpEnrollUser.personnelKhmerName} • ` : ""}
+                      {fpEnrollUser.personnelName || fpEnrollUser.nameOnDevice}
+                    </h4>
+                    <p className="text-xs text-slate-400 truncate">
+                      {fpEnrollUser.departmentName || fpEnrollUser.studentClassName || "Biometric Member"}
+                      {" • "}
+                      <span className="text-emerald-600 dark:text-emerald-400 font-semibold">
+                        {fpEnrollUser.fingerprintCount || 0} Finger(s) enrolled
+                      </span>
+                    </p>
+                  </div>
+                </div>
+
+                {/* Gate & Finger Selector */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1.5">
+                      Target Gate Terminal
+                    </label>
+                    <select
+                      value={enrollTargetGate}
+                      onChange={(e) => setEnrollTargetGate(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-800 dark:text-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none"
+                    >
+                      {devices && devices.length > 0 ? (
+                        devices.map((d) => (
+                          <option key={d.id} value={d.ipAddress || d.ip_address || d.id}>
+                            {d.name || `Gate ${d.id}`} ({d.ipAddress || d.ip_address}:{d.port || 4370})
+                          </option>
+                        ))
+                      ) : (
+                        <>
+                          <option value="203.147.129.237:4371">ZKTeco 1 (203.147.129.237:4371)</option>
+                          <option value="203.147.129.237:4370">ZKTeco 2 (203.147.129.237:4370)</option>
+                        </>
+                      )}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1.5">
+                      Finger to Enroll
+                    </label>
+                    <select
+                      value={enrollFingerIndex}
+                      onChange={(e) => setEnrollFingerIndex(Number(e.target.value))}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-800 dark:text-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none"
+                    >
+                      <option value={0}>Right Thumb (មេដៃស្តាំ)</option>
+                      <option value={1}>Right Index (ចង្អុលដៃស្តាំ)</option>
+                      <option value={2}>Right Middle (កណ្តាលដៃស្តាំ)</option>
+                      <option value={3}>Right Ring (នាងដៃស្តាំ)</option>
+                      <option value={4}>Right Little (កូនដៃស្តាំ)</option>
+                      <option value={5}>Left Thumb (មេដៃឆ្វេង)</option>
+                      <option value={6}>Left Index (ចង្អុលដៃឆ្វេង)</option>
+                      <option value={7}>Left Middle (កណ្តាលដៃឆ្វេង)</option>
+                      <option value={8}>Left Ring (នាងដៃឆ្វេង)</option>
+                      <option value={9}>Left Little (កូនដៃឆ្វេង)</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* 3-Step Enrollment Guide */}
+                <div className="p-4 rounded-2xl bg-indigo-50/60 dark:bg-indigo-950/30 border border-indigo-100 dark:border-indigo-900/60">
+                  <h5 className="text-xs font-bold text-indigo-900 dark:text-indigo-200 mb-2.5 flex items-center gap-1.5">
+                    <Sparkles size={14} className="text-indigo-500" />
+                    របៀបចុះឈ្មោះក្រយៅដៃ ៣ ជំហាន (3-Step Enrollment)
+                  </h5>
+                  <div className="grid grid-cols-3 gap-2 text-center text-[11px]">
+                    <div className="p-2 rounded-xl bg-white/80 dark:bg-slate-900/80 border border-indigo-200/50 dark:border-indigo-800/50">
+                      <div className="w-5 h-5 rounded-full bg-indigo-600 text-white font-bold mx-auto mb-1 flex items-center justify-center text-[10px]">1</div>
+                      <span className="font-bold text-slate-700 dark:text-slate-200 block">ចុចប៊ូតុងខាងក្រោម</span>
+                      <span className="text-[10px] text-slate-400">Click Activate</span>
+                    </div>
+                    <div className="p-2 rounded-xl bg-white/80 dark:bg-slate-900/80 border border-indigo-200/50 dark:border-indigo-800/50">
+                      <div className="w-5 h-5 rounded-full bg-indigo-600 text-white font-bold mx-auto mb-1 flex items-center justify-center text-[10px]">2</div>
+                      <span className="font-bold text-slate-700 dark:text-slate-200 block">ដាក់ម្រាមដៃ ៣ ដង</span>
+                      <span className="text-[10px] text-slate-400">Press 3 Times</span>
+                    </div>
+                    <div className="p-2 rounded-xl bg-white/80 dark:bg-slate-900/80 border border-indigo-200/50 dark:border-indigo-800/50">
+                      <div className="w-5 h-5 rounded-full bg-emerald-600 text-white font-bold mx-auto mb-1 flex items-center justify-center text-[10px]">3</div>
+                      <span className="font-bold text-slate-700 dark:text-slate-200 block">ម៉ាស៊ីនស្រែកថាជោគជ័យ</span>
+                      <span className="text-[10px] text-slate-400">Auto-syncs Both</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Active Sensor Live Progress Indicator */}
+                {isEnrollingFp && (
+                  <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 space-y-3 animate-in fade-in duration-200">
+                    <div className="flex items-center gap-3">
+                      <div className="relative w-10 h-10 rounded-2xl bg-amber-500 text-white flex items-center justify-center shrink-0 shadow-md shadow-amber-500/30">
+                        <div className="absolute inset-0 rounded-2xl bg-amber-400 animate-ping opacity-75" />
+                        <Fingerprint size={22} className="relative z-10 animate-pulse" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <span className="font-extrabold text-xs text-amber-800 dark:text-amber-300 block">
+                          🔴 សេនស័រម៉ាស៊ីនកំពុងដំណើរការ (Machine Sensor Active)
+                        </span>
+                        <span className="text-[11px] text-amber-700 dark:text-amber-400 block">
+                          សូមដាក់ម្រាមដៃរបស់អ្នក ៣ ដងលើម៉ាស៊ីនឥឡូវនេះ...
+                        </span>
+                      </div>
+                    </div>
+                    {/* 3 Touches Indicator */}
+                    <div className="flex items-center justify-between text-[11px] text-amber-900 dark:text-amber-200 bg-white/70 dark:bg-slate-900/70 p-2.5 rounded-xl border border-amber-200/50 dark:border-amber-800/50 font-semibold">
+                      <div className="flex items-center gap-2">
+                        <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-ping" />
+                        <span>កំពុងរង់ចាំការដាក់ម្រាមដៃ ៣ ដង...</span>
+                      </div>
+                      <span className="text-[10px] font-mono text-amber-700 dark:text-amber-300 font-bold px-2 py-0.5 rounded-md bg-amber-100 dark:bg-amber-950/80">
+                        Touch 1 • Touch 2 • Touch 3
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Celebratory Success View on Completion */}
+                {enrollFeedback?.type === "success" && (
+                  <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-500/15 via-emerald-500/10 to-teal-500/10 border border-emerald-500/30 flex items-start gap-3.5 shadow-sm animate-in zoom-in-95 duration-200">
+                    <div className="p-2.5 rounded-2xl bg-emerald-600 text-white shadow-lg shadow-emerald-600/30 shrink-0">
+                      <CheckCircle2 size={26} />
+                    </div>
+                    <div className="space-y-1 min-w-0 flex-1">
+                      <h4 className="font-extrabold text-sm text-emerald-800 dark:text-emerald-300">
+                        🎉 ចុះឈ្មោះក្រយៅដៃបានជោគជ័យ! (Enrollment Successful!)
+                      </h4>
+                      <p className="text-xs text-emerald-700 dark:text-emerald-400 font-medium">
+                        {enrollFeedback.text}
+                      </p>
+                      <div className="flex items-center gap-2 pt-1 flex-wrap text-[11px] font-semibold text-emerald-800 dark:text-emerald-300">
+                        <span className="px-2 py-0.5 rounded-md bg-emerald-100 dark:bg-emerald-950/70 border border-emerald-300 dark:border-emerald-800">
+                          ✓ រក្សាទុកក្នុង Database
+                        </span>
+                        <span className="px-2 py-0.5 rounded-md bg-emerald-100 dark:bg-emerald-950/70 border border-emerald-300 dark:border-emerald-800">
+                          ✓ Gate 1 & Gate 2 សមកាលកម្មរួចរាល់
+                        </span>
+                        {enrollFeedback.data?.templateSize && (
+                          <span className="px-2 py-0.5 rounded-md bg-indigo-50 dark:bg-indigo-950/70 border border-indigo-200 dark:border-indigo-800 text-indigo-700 dark:text-indigo-300 font-mono">
+                            Template: {enrollFeedback.data.templateSize} Bytes
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Error Status Feedback */}
+                {enrollFeedback?.type === "error" && (
+                  <div className="p-3.5 rounded-2xl text-xs font-semibold flex items-center gap-2.5 bg-rose-50 dark:bg-rose-950/70 text-rose-800 dark:text-rose-300 border border-rose-300 dark:border-rose-800 animate-in fade-in duration-150">
+                    <AlertCircle size={18} className="shrink-0 text-rose-600" />
+                    <span className="leading-snug">{enrollFeedback.text}</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="px-6 py-4 bg-slate-50 dark:bg-slate-800/50 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFpEnrollUser(null);
+                    setEnrollFeedback(null);
+                  }}
+                  className="px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-xs font-semibold hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+                >
+                  បិទ (Close)
+                </button>
+
+                {enrollFeedback?.type === "success" ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFpEnrollUser(null);
+                      setEnrollFeedback(null);
+                    }}
+                    className="flex-1 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-lg shadow-emerald-600/30 flex items-center justify-center gap-2 transition-all cursor-pointer"
+                  >
+                    <CheckCircle2 size={16} />
+                    <span>✓ រួចរាល់ (Enrollment Successful • Done)</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={isEnrollingFp}
+                    onClick={() => handleRemoteEnrollFingerprint(fpEnrollUser.devicePin, enrollTargetGate, enrollFingerIndex)}
+                    className="flex-1 py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-xs shadow-lg shadow-emerald-600/30 flex items-center justify-center gap-2 transition-all cursor-pointer"
+                  >
+                    {isEnrollingFp ? (
+                      <>
+                        <Loader2 size={16} className="animate-spin" />
+                        <span>កំពុងរង់ចាំការដាក់ម្រាមដៃ ៣ ដងលើម៉ាស៊ីន...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Fingerprint size={16} />
+                        <span>👆 ចាប់ផ្តើមស្កេនលើម៉ាស៊ីន (Activate Terminal Sensor)</span>
+                      </>
+                    )}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </Portal>
+      )}
     </div>
   );
 }

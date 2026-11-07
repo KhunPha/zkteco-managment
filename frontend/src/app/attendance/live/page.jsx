@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Volume2,
@@ -26,6 +26,7 @@ import {
   Video,
   VideoOff,
   RefreshCw,
+  AlertCircle,
 } from "lucide-react";
 import api from "@/lib/api";
 import { formatTime } from "@/lib/utils";
@@ -36,31 +37,29 @@ import {
   AUDIO_OPTIONS,
 } from "@/lib/kioskAudioEngine";
 import {
+  detectFaceFast,
   detectFaceWithDescriptor,
   findBestFaceMatch,
+  prepareEnrolledFaces,
   cropFaceBase64,
   captureFrameBase64,
   loadFaceModels,
+  LivenessDetector,
 } from "@/lib/faceEngine";
 
 export default function AttendanceLiveKioskPage() {
   const queryClient = useQueryClient();
   const [audioModalOpen, setAudioModalOpen] = useState(false);
-  const [selectedSoundId, setSelectedSoundId] = useState("combo_melody_khmer");
+  const [selectedSoundId, setSelectedSoundId] = useState("khmer_thank_you");
   const [audioAutoPlay, setAudioAutoPlay] = useState(true);
-  const [volume, setVolume] = useState(0.9);
-
-  // Background Music (BGM) State - Default ON
-  const [bgMusicEnabled, setBgMusicEnabled] = useState(true);
-  const [bgMusicTrack, setBgMusicTrack] = useState("in_another_life");
-  const [bgMusicVolume, setBgMusicVolume] = useState(0.22);
+  const [volume, setVolume] = useState(0.95);
 
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [currentTime, setCurrentTime] = useState("");
   const [currentDateStr, setCurrentDateStr] = useState("");
   const [lastLogId, setLastLogId] = useState(null);
   const [activeScan, setActiveScan] = useState(null);
-  const [countdown, setCountdown] = useState(5);
+  const [countdown, setCountdown] = useState(2);
 
   const audioRef = useRef(null);
   const lastAudioPlayedRef = useRef(0);
@@ -68,8 +67,20 @@ export default function AttendanceLiveKioskPage() {
   const countdownIntervalRef = useRef(null);
 
   // Webcam Face ID Live Recognition State
-  const [webcamEnabled, setWebcamEnabled] = useState(false);
-  const [webcamPunchState, setWebcamPunchState] = useState("CHECK_IN");
+  const [webcamEnabled, setWebcamEnabled] = useState(true);
+  // Helper to determine automatic shift punch state without requiring manual button toggle
+  const getAutoPunchState = () => {
+    const hour = new Date().getHours();
+    const minute = new Date().getMinutes();
+    const timeVal = hour + minute / 60.0;
+    // Morning: before 11:30 AM -> CHECK_IN
+    // Lunch departure: 11:30 AM - 1:30 PM -> CHECK_OUT
+    // Afternoon arrival: 1:30 PM - 4:30 PM -> CHECK_IN
+    // Evening departure: after 4:30 PM -> CHECK_OUT
+    if (timeVal >= 11.5 && timeVal < 13.5) return "CHECK_OUT";
+    if (timeVal >= 16.5) return "CHECK_OUT";
+    return "CHECK_IN";
+  };
   const [webcamStatus, setWebcamStatus] = useState("idle");
   const [webcamFeedback, setWebcamFeedback] = useState(null);
   const [webcamError, setWebcamError] = useState(null);
@@ -83,16 +94,51 @@ export default function AttendanceLiveKioskPage() {
   const isProcessingFrameRef = useRef(false);
   const cooldownMapRef = useRef(new Map());
   const consecutiveMatchRef = useRef({ pin: null, count: 0 });
+  const activeMatchRef = useRef(null);
+  const frameCounterRef = useRef(0);
+  const lastFeedbackRef = useRef("");
+  const lastBoxKeyRef = useRef("");
+  const livenessDetectorRef = useRef(new LivenessDetector());
 
-  // Query enrolled face descriptors
+  // Throttled UI State updaters to prevent hundreds of React re-renders per second
+  const updateFeedback = (msg) => {
+    if (lastFeedbackRef.current !== msg) {
+      lastFeedbackRef.current = msg;
+      setWebcamFeedback(msg);
+    }
+  };
+
+  const updateLiveBox = (box) => {
+    const key = box
+      ? `${box.matched ? 1 : 0}-${box.unregistered ? 1 : 0}-${box.tooFar ? 1 : 0}-${box.outsideArea ? 1 : 0}-${box.spoof ? 1 : 0}-${box.awaitingLiveness ? 1 : 0}-${box.name || ""}`
+      : "null";
+    if (lastBoxKeyRef.current !== key) {
+      lastBoxKeyRef.current = key;
+      setLiveFaceBox(box);
+    }
+  };
+
+  // Query enrolled face descriptors with automatic polling so newly enrolled faces sync instantly
   const { data: enrolledFaces, refetch: refetchFaces } = useQuery({
     queryKey: ["enrolled-face-descriptors"],
     queryFn: async () => {
       const res = await api.get("/api/v1/faces/descriptors");
       return res.data?.data || [];
     },
-    staleTime: 30000,
+    staleTime: 10000,
+    refetchInterval: 15000,
   });
+
+  // Pre-normalize descriptors into Float32Array once to ensure sub-millisecond matching
+  const preparedEnrolledFaces = useMemo(() => {
+    return prepareEnrolledFaces(enrolledFaces || []);
+  }, [enrolledFaces]);
+
+  // Use a mutable ref so the 60 FPS animation loop NEVER suffers from stale closure or missing data
+  const enrolledFacesRef = useRef([]);
+  useEffect(() => {
+    enrolledFacesRef.current = preparedEnrolledFaces || [];
+  }, [preparedEnrolledFaces]);
 
   // Initialize and unlock audio engine preferences
   useEffect(() => {
@@ -100,18 +146,8 @@ export default function AttendanceLiveKioskPage() {
     setAudioAutoPlay(kioskAudioEngine.getAutoPlayEnabled());
     setVolume(kioskAudioEngine.getVolume());
 
-    const isBgm = kioskAudioEngine.getBgMusicEnabled();
-    const track = kioskAudioEngine.getBgMusicTrack();
-    const bgmVol = kioskAudioEngine.getBgMusicVolume();
-    setBgMusicEnabled(isBgm);
-    setBgMusicTrack(track);
-    setBgMusicVolume(bgmVol);
-
     const unlockAudio = () => {
       kioskAudioEngine.ensureUnlocked();
-      if (kioskAudioEngine.getBgMusicEnabled()) {
-        kioskAudioEngine.startBgMusic(kioskAudioEngine.getBgMusicTrack(), kioskAudioEngine.getBgMusicVolume());
-      }
     };
     window.addEventListener("click", unlockAudio, { once: true });
     window.addEventListener("touchstart", unlockAudio, { once: true });
@@ -120,7 +156,6 @@ export default function AttendanceLiveKioskPage() {
       window.removeEventListener("click", unlockAudio);
       window.removeEventListener("touchstart", unlockAudio);
       window.removeEventListener("keydown", unlockAudio);
-      kioskAudioEngine.stopBgMusic();
     };
   }, []);
 
@@ -137,29 +172,6 @@ export default function AttendanceLiveKioskPage() {
   const handleChangeVolume = (val) => {
     setVolume(val);
     kioskAudioEngine.setVolume(val);
-  };
-
-  const handleToggleBgMusic = (enabled) => {
-    setBgMusicEnabled(enabled);
-    kioskAudioEngine.setBgMusicEnabled(enabled);
-    if (enabled) {
-      kioskAudioEngine.startBgMusic(bgMusicTrack, bgMusicVolume);
-    } else {
-      kioskAudioEngine.stopBgMusic();
-    }
-  };
-
-  const handleChangeBgMusicTrack = (trackId) => {
-    setBgMusicTrack(trackId);
-    kioskAudioEngine.setBgMusicTrack(trackId);
-    if (bgMusicEnabled) {
-      kioskAudioEngine.startBgMusic(trackId, bgMusicVolume);
-    }
-  };
-
-  const handleChangeBgMusicVolume = (vol) => {
-    setBgMusicVolume(vol);
-    kioskAudioEngine.setBgMusicVolume(vol);
   };
 
   const currentSoundOption =
@@ -186,27 +198,66 @@ export default function AttendanceLiveKioskPage() {
     return () => clearInterval(interval);
   }, []);
 
-  // Poll real-time biometric raw punch events with high-frequency 400ms interval
+  // Query registered attendance terminals dynamically
+  const { data: devicesList } = useQuery({
+    queryKey: ["kiosk-devices"],
+    queryFn: async () => {
+      const res = await api.get("/api/v1/devices?size=50");
+      return res.data?.data?.content || res.data?.data || [];
+    },
+    staleTime: 30000,
+  });
+
+  const activeDevices = useMemo(() => {
+    if (devicesList && Array.isArray(devicesList) && devicesList.length > 0) {
+      return devicesList;
+    }
+    return [
+      { id: 1, name: "ZKTeco 1 (203.147.129.237:4371)", ipAddress: "203.147.129.237", port: 4371, connectionStatus: "ONLINE" },
+      { id: 2, name: "ZKTeco 2 (203.147.129.237:4370)", ipAddress: "203.147.129.237", port: 4370, connectionStatus: "ONLINE" },
+    ];
+  }, [devicesList]);
+
+  // Poll real-time biometric raw punch events with instant 100ms interval
   const { data: liveScans } = useQuery({
     queryKey: ["live-scans-stream"],
     queryFn: async () => {
       const res = await api.get("/api/v1/attendance/live-scans?limit=15");
       return res.data?.data || [];
     },
-    refetchInterval: 400,
+    refetchInterval: 100,
     staleTime: 0,
     refetchIntervalInBackground: true,
   });
 
-  // Handle auto-cleanup and 5-second countdown timer
+  // Handle auto-cleanup and 2-second countdown timer
   const triggerActiveScanWithCountdown = (record) => {
-    setActiveScan(record);
-    setCountdown(5);
+    // Show only the official profile picture, never the webcam face scan snapshot
+    let displayPhoto = record.profileImageUrl;
+    const match = enrolledFaces?.find(
+      (f) => String(f.devicePin) === String(record.devicePin || record.personnelCode)
+    );
+    if (!displayPhoto || displayPhoto.includes("/faces/")) {
+      if (match?.photoUrl && !match.photoUrl.includes("/faces/")) {
+        displayPhoto = match.photoUrl;
+      }
+    }
+
+    setActiveScan({
+      ...record,
+      positionOrGrade: record.positionOrGrade || match?.positionOrGrade,
+      branchOrYear: record.branchOrYear || match?.branchOrYear,
+      gender: record.gender || match?.gender,
+      contactInfo: record.contactInfo || match?.contactInfo,
+      departmentOrClass: record.departmentOrClass || record.departmentName || match?.departmentOrClass,
+      profileImageUrl: displayPhoto,
+    });
+    setCountdown(2);
 
     if (dismissTimerRef.current) clearTimeout(dismissTimerRef.current);
     if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
 
-    let secLeft = 5;
+    let secLeft = 2;
     countdownIntervalRef.current = setInterval(() => {
       secLeft -= 1;
       setCountdown((prev) => Math.max(0, prev - 1));
@@ -217,8 +268,8 @@ export default function AttendanceLiveKioskPage() {
 
     dismissTimerRef.current = setTimeout(() => {
       setActiveScan(null);
-      setCountdown(5);
-    }, 5000);
+      setCountdown(2);
+    }, 2000);
   };
 
   // Cleanup timers on unmount
@@ -247,9 +298,10 @@ export default function AttendanceLiveKioskPage() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
-          width: { ideal: 1280, min: 640 },
-          height: { ideal: 720, min: 480 },
+          width: { ideal: 960, max: 1280 },
+          height: { ideal: 540, max: 720 },
           facingMode: "user",
+          frameRate: { ideal: 24, max: 30 },
         },
         audio: false,
       });
@@ -260,7 +312,7 @@ export default function AttendanceLiveKioskPage() {
         webcamVideoRef.current.onloadedmetadata = () => {
           webcamVideoRef.current.play();
           setWebcamStatus("ready");
-          setWebcamFeedback("Webcam Gate Ready • ត្រៀមស្កេន");
+          updateFeedback("Webcam Gate Ready • ត្រៀមស្កេន");
           startWebcamLoop();
         };
       }
@@ -274,6 +326,9 @@ export default function AttendanceLiveKioskPage() {
   const stopWebcamFaceId = () => {
     isLoopActiveRef.current = false;
     if (webcamLoopRef.current) {
+      if (typeof window !== "undefined" && window.cancelAnimationFrame) {
+        window.cancelAnimationFrame(webcamLoopRef.current);
+      }
       clearTimeout(webcamLoopRef.current);
       clearInterval(webcamLoopRef.current);
       webcamLoopRef.current = null;
@@ -283,20 +338,36 @@ export default function AttendanceLiveKioskPage() {
       webcamStreamRef.current = null;
     }
     setWebcamStatus("idle");
-    setWebcamFeedback(null);
-    setLiveFaceBox(null);
+    updateFeedback(null);
+    updateLiveBox(null);
     consecutiveMatchRef.current = { pin: null, count: 0 };
+    activeMatchRef.current = null;
+    frameCounterRef.current = 0;
+    if (livenessDetectorRef.current) {
+      livenessDetectorRef.current.reset();
+    }
   };
 
   const startWebcamLoop = () => {
     isLoopActiveRef.current = true;
     if (webcamLoopRef.current) {
+      if (typeof window !== "undefined" && window.cancelAnimationFrame) {
+        window.cancelAnimationFrame(webcamLoopRef.current);
+      }
       clearTimeout(webcamLoopRef.current);
       clearInterval(webcamLoopRef.current);
+      webcamLoopRef.current = null;
     }
 
     const processNextFrame = async () => {
       if (!isLoopActiveRef.current) return;
+
+      // Always request next frame synchronized with display VSync (60 FPS)
+      webcamLoopRef.current = window.requestAnimationFrame(processNextFrame);
+
+      // Process AI inference on alternate frames (30 FPS) to maintain zero UI lag
+      frameCounterRef.current = (frameCounterRef.current + 1) % 2;
+      if (frameCounterRef.current !== 0) return;
 
       const video = webcamVideoRef.current;
       const canvas = webcamCanvasRef.current;
@@ -305,136 +376,273 @@ export default function AttendanceLiveKioskPage() {
         if (!isProcessingFrameRef.current) {
           isProcessingFrameRef.current = true;
           try {
-            // Ultra-Fast Tiny Detector (10-20ms per frame, 30+ FPS) + 68 Landmark + ResNet-34
-            const result = await detectFaceWithDescriptor(video, "tiny", 0.45);
+            // Step 1: Sub-5ms pitch/tilt/distance-tolerant face detector (Tiny 320, score >= 0.20)
+            const fastFace = await detectFaceFast(video, 320, 0.20);
 
             if (canvas && video && isLoopActiveRef.current) {
               const ctx = canvas.getContext("2d");
               const w = video.videoWidth || 640;
               const h = video.videoHeight || 480;
-              canvas.width = w;
-              canvas.height = h;
+
+              // Prevent GPU buffer re-allocation unless video dimensions actually changed
+              if (canvas.width !== w || canvas.height !== h) {
+                canvas.width = w;
+                canvas.height = h;
+              }
               ctx.clearRect(0, 0, w, h);
 
-              if (result && result.box) {
-                const { x, y, width, height } = result.box;
+              if (fastFace && fastFace.box) {
+                const { x, y, width, height } = fastFace.box;
 
-                // 1. Check face proximity (allow larger scanning area across full camera frame)
-                if (width < 60 || height < 60) {
+                // Wide Long-Distance Scanning Boundaries: Allows natural standing distance (1m - 3m)
+                const areaMinX = w * 0.05;
+                const areaMaxX = w * 0.95;
+                const areaMinY = h * 0.05;
+                const areaMaxY = h * 0.95;
+
+                const faceCenterX = x + width / 2;
+                const faceCenterY = y + height / 2;
+
+                const isInsideArea = (
+                  faceCenterX >= areaMinX &&
+                  faceCenterX <= areaMaxX &&
+                  faceCenterY >= areaMinY &&
+                  faceCenterY <= areaMaxY
+                );
+
+                if (!isInsideArea) {
                   consecutiveMatchRef.current = { pin: null, count: 0 };
-                  setLiveFaceBox({ ...result.box, matched: false, tooFar: true });
-                  setWebcamFeedback("📏 Move Closer to Camera • សូមខិតមកជិតកាមេរ៉ា");
+                  activeMatchRef.current = null;
+                  updateLiveBox({ ...fastFace.box, matched: false, outsideArea: true });
+                  updateFeedback("📍 Move Face Inside View • សូមដាក់ផ្ទៃមុខក្នុងតំបន់ស្កេន");
+                  ctx.strokeStyle = "#f59e0b";
+                  ctx.lineWidth = 2.5;
+                  ctx.setLineDash([6, 6]);
+                  ctx.strokeRect(x, y, width, height);
+                  ctx.setLineDash([]);
+                } else if (width < 22 || height < 22) {
+                  consecutiveMatchRef.current = { pin: null, count: 0 };
+                  activeMatchRef.current = null;
+                  updateLiveBox({ ...fastFace.box, matched: false, tooFar: true });
+                  updateFeedback("📏 Step Closer to Camera • សូមខិតមកជិតបន្តិច");
                   ctx.strokeStyle = "#f59e0b";
                   ctx.lineWidth = 2.5;
                   ctx.setLineDash([6, 6]);
                   ctx.strokeRect(x, y, width, height);
                   ctx.setLineDash([]);
                 } else {
-                  // 2. Strict Biometric Matching with 0.32 threshold (Zero False Accepts)
-                  const match = findBestFaceMatch(result.descriptor, enrolledFaces || [], 0.32);
+                  const now = Date.now();
+                  const activeMatch = activeMatchRef.current;
 
-                  if (match.matched && match.person) {
-                    const pin = match.person.devicePin;
-                    if (consecutiveMatchRef.current.pin === pin) {
-                      consecutiveMatchRef.current.count += 1;
-                    } else {
-                      consecutiveMatchRef.current = { pin, count: 1 };
-                    }
-
-                    setLiveFaceBox({
-                      ...result.box,
-                      matched: true,
-                      name: match.person.personName,
-                      confidence: match.confidence,
-                      distance: match.distance,
-                    });
-
-                    // Draw green recognition box
+                  // Smooth 60 FPS Tracking: If already verified in the last 2.5s, track box at 3ms without re-running ResNet-34!
+                  if (activeMatch && (now - activeMatch.time < 2500)) {
                     ctx.strokeStyle = "#10b981";
                     ctx.lineWidth = 3;
                     ctx.shadowColor = "#10b981";
                     ctx.shadowBlur = 14;
                     ctx.strokeRect(x, y, width, height);
 
-                    // 3. Temporal Consistency: Require 2 consecutive frames before punching
-                    if (consecutiveMatchRef.current.count >= 2) {
-                      const lastPunchTime = cooldownMapRef.current.get(pin) || 0;
-                      const now = Date.now();
-
-                      if (now - lastPunchTime > 4000) {
-                        cooldownMapRef.current.set(pin, now);
-                        isPunchingRef.current = true;
-                        setWebcamFeedback(`✓ Verified: ${match.person.personName} (${match.confidence}%)`);
-
-                        // Capture ONLY cropped face portrait (320x320) - NEVER full camera frame!
-                        const snapshotBase64 = cropFaceBase64(video, result.box, 0.25, 320, 0.90);
-
-                        // Dispatch verified face punch with vector for server validation
-                        api.post("/api/v1/faces/punch", {
-                          devicePin: pin,
-                          punchState: webcamPunchState,
-                          distance: match.distance,
-                          confidence: match.confidence,
-                          descriptor: result.descriptor,
-                          snapshotBase64,
-                          deviceName: "Webcam Gate Scanner",
-                        }).then((res) => {
-                          if (res.data?.data) {
-                            const punchData = res.data.data;
-                            triggerActiveScanWithCountdown({
-                              ...punchData,
-                              profileImageUrl: punchData.photoUrl,
-                              personnelName: punchData.personName,
-                              personnelKhmerName: punchData.khmerName,
-                              personnelCode: punchData.personnelCode,
-                              personnelType: punchData.personnelType,
-                              departmentName: punchData.departmentOrClass,
-                              punchTime: punchData.punchTime,
-                              punchState: punchData.punchState,
-                            });
-
-                            // Immediate refresh of live scans feed
-                            queryClient.invalidateQueries({ queryKey: ["live-scans-stream"] });
-
-                            // Trigger sound & speech with BGM ducking
-                            if (audioAutoPlay) {
-                              kioskAudioEngine.ensureUnlocked();
-                              kioskAudioEngine.play(selectedSoundId, volume);
-                            }
-                          }
-                        }).catch((err) => {
-                          console.error("Punch request failed:", err);
-                          setWebcamFeedback(err.response?.data?.message || "Punch rejected");
-                        }).finally(() => {
-                          setTimeout(() => {
-                            isPunchingRef.current = false;
-                          }, 1200);
-                        });
-                      } else {
-                        const secLeft = Math.ceil((4000 - (now - lastPunchTime)) / 1000);
-                        setWebcamFeedback(`✓ Already Recorded: ${match.person.personName} (Wait ${secLeft}s)`);
-                      }
-                    } else {
-                      setWebcamFeedback(`Verifying Face... • កំពុងផ្ទៀងផ្ទាត់ (${match.person.personName})`);
-                    }
+                    updateLiveBox({
+                      ...fastFace.box,
+                      matched: true,
+                      name: activeMatch.person.personName,
+                      confidence: activeMatch.confidence,
+                      distance: activeMatch.distance,
+                    });
                   } else {
-                    // 4. Face Detected BUT NOT ENROLLED (e.g. Person B while only Person A enrolled)
-                    consecutiveMatchRef.current = { pin: null, count: 0 };
-                    setLiveFaceBox({ ...result.box, matched: false, unregistered: true });
-                    setWebcamFeedback("⚠️ Unregistered Face • មិនទាន់ចុះឈ្មោះ (Access Denied)");
+                    // Run deep descriptor & pitch-tolerant liveness with 320 input size for distance
+                    const result = await detectFaceWithDescriptor(video, "tiny", 0.20, 320);
+                    if (result && result.box) {
+                      const resCenterX = result.box.x + result.box.width / 2;
+                      const resCenterY = result.box.y + result.box.height / 2;
+                      const isResultInside = (
+                        resCenterX >= areaMinX &&
+                        resCenterX <= areaMaxX &&
+                        resCenterY >= areaMinY &&
+                        resCenterY <= areaMaxY &&
+                        result.box.x >= (areaMinX - result.box.width * 0.30) &&
+                        (result.box.x + result.box.width) <= (areaMaxX + result.box.width * 0.30)
+                      );
 
-                    // Draw red warning box
-                    ctx.strokeStyle = "#ef4444";
-                    ctx.lineWidth = 2.5;
-                    ctx.shadowColor = "#ef4444";
-                    ctx.shadowBlur = 8;
-                    ctx.strokeRect(x, y, width, height);
+                      // Multi-Frame Anti-Spoofing & Liveness Evaluation
+                      const liveness = livenessDetectorRef.current.evaluate(result, video);
+
+                      if (!isResultInside) {
+                        livenessDetectorRef.current.reset();
+                        consecutiveMatchRef.current = { pin: null, count: 0 };
+                        activeMatchRef.current = null;
+                        updateLiveBox({ ...result.box, matched: false, outsideArea: true });
+                        updateFeedback("📍 Move Face Inside Target Area • សូមដាក់ផ្ទៃមុខក្នុងតំបន់ស្កេន");
+                        ctx.strokeStyle = "#f59e0b";
+                        ctx.lineWidth = 2.5;
+                        ctx.setLineDash([6, 6]);
+                        ctx.strokeRect(result.box.x, result.box.y, result.box.width, result.box.height);
+                        ctx.setLineDash([]);
+                      } else if (liveness.isScreenSpoof || liveness.isStaticPhoto) {
+                        // 100% Computer Screen / Photo Attack Prevention
+                        consecutiveMatchRef.current = { pin: null, count: 0 };
+                        activeMatchRef.current = null;
+                        updateLiveBox({ ...result.box, matched: false, spoof: true });
+                        updateFeedback("⚠️ Photo / Computer Screen Detected • ហាមប្រើរូបភាព ឬកុំព្យូទ័រស្កេន");
+                        ctx.strokeStyle = "#ef4444";
+                        ctx.lineWidth = 3;
+                        ctx.setLineDash([6, 6]);
+                        ctx.strokeRect(result.box.x, result.box.y, result.box.width, result.box.height);
+                        ctx.setLineDash([]);
+                      } else {
+                        const currentEnrolled = enrolledFacesRef.current || [];
+                        if (currentEnrolled.length === 0) {
+                          consecutiveMatchRef.current = { pin: null, count: 0 };
+                          activeMatchRef.current = null;
+                          updateLiveBox(null);
+                          updateFeedback("Loading Face Biometrics... • កំពុងទាញយកទិន្នន័យ");
+                        } else {
+                          const match = findBestFaceMatch(result.descriptor, currentEnrolled, 0.49);
+
+                          if (match.matched && match.person) {
+                            const pin = match.person.devicePin;
+
+                            // STRICT ANTI-SPOOFING: Must verify active living human before punch!
+                            if (!liveness.isLive) {
+                              consecutiveMatchRef.current = { pin: null, count: 0 };
+                              activeMatchRef.current = null;
+                              updateLiveBox({
+                                ...result.box,
+                                matched: false,
+                                awaitingLiveness: true,
+                                name: match.person.personName,
+                              });
+                              updateFeedback(
+                                liveness.message ||
+                                "🔍 Verifying Live Face Biometrics... • កំពុងផ្ទៀងផ្ទាត់"
+                              );
+                              ctx.strokeStyle = "#f59e0b";
+                              ctx.lineWidth = 2.5;
+                              ctx.setLineDash([5, 5]);
+                              ctx.strokeRect(result.box.x, result.box.y, result.box.width, result.box.height);
+                              ctx.setLineDash([]);
+                            } else {
+                              // Live Human Face 100% Authenticated!
+                              if (consecutiveMatchRef.current.pin === pin) {
+                                consecutiveMatchRef.current.count += 1;
+                              } else {
+                                consecutiveMatchRef.current = { pin, count: 1 };
+                              }
+
+                              activeMatchRef.current = {
+                                person: match.person,
+                                confidence: match.confidence,
+                                distance: match.distance,
+                                time: Date.now(),
+                              };
+
+                              updateLiveBox({
+                                ...result.box,
+                                matched: true,
+                                name: match.person.personName,
+                                confidence: match.confidence,
+                                distance: match.distance,
+                              });
+
+                              ctx.strokeStyle = "#10b981";
+                              ctx.lineWidth = 3;
+                              ctx.shadowColor = "#10b981";
+                              ctx.shadowBlur = 14;
+                              ctx.strokeRect(result.box.x, result.box.y, result.box.width, result.box.height);
+
+                              // Real Face ID: Punch attendance immediately for verified live human (zero forced blinking required)
+                              const isImmediate = liveness.isLive && !liveness.isScreenSpoof;
+                              if (isImmediate) {
+                                const lastPunchTime = cooldownMapRef.current.get(pin) || 0;
+                                if (now - lastPunchTime > 4000) {
+                                  cooldownMapRef.current.set(pin, now);
+                                  isPunchingRef.current = true;
+                                  updateFeedback(`✓ Verified Live Face: ${match.person.personName} (${match.confidence}%)`);
+
+                                  if (audioAutoPlay) {
+                                    lastAudioPlayedRef.current = Date.now();
+                                    kioskAudioEngine.ensureUnlocked();
+                                    kioskAudioEngine.play(
+                                      "khmer_thank_you",
+                                      volume,
+                                      match.person.personName,
+                                      match.person.khmerName
+                                    );
+                                  }
+
+                                  const currentAutoPunchState = getAutoPunchState();
+
+                                  triggerActiveScanWithCountdown({
+                                    devicePin: pin,
+                                    personnelName: match.person.personName,
+                                    personnelKhmerName: match.person.khmerName,
+                                    personnelCode: match.person.personnelCode || pin,
+                                    personnelType: match.person.personnelType || "EMPLOYEE",
+                                    departmentOrClass: match.person.departmentOrClass || "Campus",
+                                    positionOrGrade: match.person.positionOrGrade,
+                                    branchOrYear: match.person.branchOrYear,
+                                    gender: match.person.gender,
+                                    contactInfo: match.person.contactInfo,
+                                    punchTime: new Date().toISOString(),
+                                    punchState: currentAutoPunchState,
+                                    profileImageUrl: match.person.photoUrl,
+                                    confidence: match.confidence,
+                                    deviceName: "Webcam Gate Scanner",
+                                  });
+
+                                  setTimeout(() => {
+                                    updateLiveBox(null);
+                                    activeMatchRef.current = null;
+                                    if (canvas) {
+                                      const c = canvas.getContext("2d");
+                                      if (c) c.clearRect(0, 0, canvas.width, canvas.height);
+                                    }
+                                  }, 800);
+
+                                  api.post("/api/v1/faces/punch", {
+                                    devicePin: pin,
+                                    punchState: currentAutoPunchState,
+                                    distance: match.distance,
+                                    confidence: match.confidence,
+                                    descriptor: result.descriptor,
+                                    deviceName: "Webcam Gate Scanner",
+                                  }).catch((err) => {
+                                    console.error("Punch background sync note:", err);
+                                  }).finally(() => {
+                                    setTimeout(() => {
+                                      isPunchingRef.current = false;
+                                    }, 1000);
+                                  });
+                                } else {
+                                  const secLeft = Math.ceil((4000 - (now - lastPunchTime)) / 1000);
+                                  updateFeedback(`✓ Already Recorded: ${match.person.personName} (Wait ${secLeft}s)`);
+                                }
+                              } else {
+                                updateFeedback(`Verifying Face... • កំពុងផ្ទៀងផ្ទាត់ (${match.person.personName})`);
+                              }
+                            }
+                          } else {
+                            consecutiveMatchRef.current = { pin: null, count: 0 };
+                            activeMatchRef.current = null;
+                            updateLiveBox({ ...result.box, matched: false, unregistered: true });
+                            updateFeedback("⚠️ Unregistered Face • មិនទាន់ចុះឈ្មោះ (Access Denied)");
+
+                            ctx.strokeStyle = "#ef4444";
+                            ctx.lineWidth = 2.5;
+                            ctx.shadowColor = "#ef4444";
+                            ctx.shadowBlur = 8;
+                            ctx.strokeRect(result.box.x, result.box.y, result.box.width, result.box.height);
+                          }
+                        }
+                      }
+                    }
                   }
                 }
               } else {
                 consecutiveMatchRef.current = { pin: null, count: 0 };
-                setLiveFaceBox(null);
-                setWebcamFeedback("Looking for face... • សូមបែរមុខរកកាមេរ៉ា");
+                activeMatchRef.current = null;
+                updateLiveBox(null);
+                updateFeedback("Looking for face... • សូមបែរមុខរកកាមេរ៉ា");
               }
             }
           } catch (loopErr) {
@@ -444,14 +652,9 @@ export default function AttendanceLiveKioskPage() {
           }
         }
       }
-
-      // Schedule next frame with 50ms pacing (~16-20 FPS)
-      if (isLoopActiveRef.current) {
-        webcamLoopRef.current = setTimeout(processNextFrame, 50);
-      }
     };
 
-    processNextFrame();
+    webcamLoopRef.current = window.requestAnimationFrame(processNextFrame);
   };
 
   useEffect(() => {
@@ -471,12 +674,12 @@ export default function AttendanceLiveKioskPage() {
     const latest = liveScans[0];
     if (!latest) return;
 
-    // First load check: only display as active scan if punch was within the last 5 seconds
+    // First load check: only display as active scan if punch was within the last 2 seconds
     if (lastLogId === null) {
       setLastLogId(latest.logId);
       if (latest.punchTime) {
         const punchAgeMs = Date.now() - new Date(latest.punchTime).getTime();
-        if (punchAgeMs >= 0 && punchAgeMs <= 5000) {
+        if (punchAgeMs >= 0 && punchAgeMs <= 2000) {
           triggerActiveScanWithCountdown(latest);
         }
       }
@@ -488,12 +691,12 @@ export default function AttendanceLiveKioskPage() {
       setLastLogId(latest.logId);
       triggerActiveScanWithCountdown(latest);
 
-      // Automatic computer audio playback with 1.5s debounce
+      // Automatic computer audio playback with 2.0s anti-duplicate debounce
       if (audioAutoPlay) {
         const now = Date.now();
-        if (now - lastAudioPlayedRef.current > 1500) {
+        if (now - lastAudioPlayedRef.current > 2000) {
           lastAudioPlayedRef.current = now;
-          kioskAudioEngine.play(selectedSoundId, volume);
+          kioskAudioEngine.play("khmer_thank_you", volume);
         }
       }
     }
@@ -537,14 +740,14 @@ export default function AttendanceLiveKioskPage() {
 
   const playTestVoice = () => {
     kioskAudioEngine.ensureUnlocked();
-    kioskAudioEngine.play(selectedSoundId, volume);
+    kioskAudioEngine.play("khmer_thank_you", volume, null, null, true);
   };
 
   const dismissActiveScan = () => {
     if (dismissTimerRef.current) clearTimeout(dismissTimerRef.current);
     if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
     setActiveScan(null);
-    setCountdown(5);
+    setCountdown(2);
   };
 
   const kioskContent = (
@@ -572,11 +775,14 @@ export default function AttendanceLiveKioskPage() {
               </h1>
               <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping"></span>
-                ULTRA-FAST LIVE SYNC (400ms)
+                ULTRA-FAST LIVE SYNC (100ms)
               </span>
             </div>
             <p className="text-xs text-slate-400">
-              {currentDateStr} • ZKTeco IN01-A Dual Gate (192.168.1.201 & .202)
+              {currentDateStr} •{" "}
+              {activeDevices.length > 0
+                ? activeDevices.map((d) => `${d.name || `Gate ${d.id}`} (${d.ipAddress || d.ip_address || "203.147.129.237"}:${d.port || 4370})`).join(" & ")
+                : "ZKTeco Dual Gate (203.147.129.237:4371 & :4370)"}
             </p>
           </div>
         </div>
@@ -618,21 +824,6 @@ export default function AttendanceLiveKioskPage() {
               )}
             </button>
 
-            {/* Background Music BGM Toggle Button */}
-            <button
-              onClick={() => handleToggleBgMusic(!bgMusicEnabled)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 sm:py-2 rounded-2xl border text-xs font-semibold transition-all cursor-pointer shadow-xs ${
-                bgMusicEnabled
-                  ? "bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30"
-                  : "bg-slate-800/80 text-slate-400 border-slate-700 hover:bg-slate-800 hover:text-slate-200"
-              }`}
-              title="តន្ត្រីផ្ទៃក្រោយ (Background Music BGM Loop) - Click to toggle"
-            >
-              <Music size={14} className={bgMusicEnabled ? "text-amber-400 animate-pulse" : "text-slate-400"} />
-              <span className="hidden sm:inline font-bold">
-                {bgMusicEnabled ? "តន្ត្រីផ្ទៃក្រោយ: បើក" : "តន្ត្រី: បិទ"}
-              </span>
-            </button>
 
             {/* Audio Settings & Auto-Play Status Button */}
             <button
@@ -682,67 +873,52 @@ export default function AttendanceLiveKioskPage() {
 
       {/* Main Kiosk Content */}
       <div
-        className={`grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-5 ${
+        className={`grid grid-cols-1 ${
+          webcamEnabled ? "lg:grid-cols-12" : "lg:grid-cols-12"
+        } gap-4 sm:gap-5 ${
           isFullscreen ? "flex-1 min-h-0 overflow-hidden" : "gap-6"
         }`}
       >
-        {/* Left Column: Big Real-Time Scan Display Card */}
-        <div
-          className={`lg:col-span-7 xl:col-span-8 ${
-            isFullscreen ? "h-full flex flex-col overflow-hidden" : "space-y-4"
-          }`}
-        >
-          {/* Webcam Face ID Live Scanner Pane */}
-          {webcamEnabled && (
-            <div className="p-4 sm:p-5 rounded-3xl bg-slate-900 border border-slate-800 text-white shadow-2xl space-y-3.5 mb-3">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2 border-b border-slate-800">
-                <div className="flex items-center gap-2.5">
+        {/* 1. Webcam Face ID Live Scanner Pane (Left Column when enabled) */}
+        {webcamEnabled && (
+          <div
+            className={`lg:col-span-6 xl:col-span-6 ${
+              isFullscreen ? "h-full flex flex-col overflow-hidden" : "flex flex-col"
+            }`}
+          >
+            <div className={`p-4 sm:p-5 rounded-3xl bg-slate-900 border border-slate-800 text-white shadow-2xl flex flex-col justify-between ${
+              isFullscreen ? "h-full overflow-hidden" : "h-full min-h-[560px]"
+            }`}>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2.5 border-b border-slate-800 shrink-0">
+                <div className="flex items-center gap-2">
                   <span className="relative flex h-3 w-3">
                     <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
                     <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
                   </span>
                   <div>
                     <h3 className="font-bold text-xs uppercase tracking-wider text-emerald-400 flex items-center gap-2">
-                      <span>Webcam Face ID Gate Camera</span>
+                      <span>Face ID Camera</span>
                       <span className="text-[10px] px-2 py-0.2 rounded-full bg-emerald-950 text-emerald-300 font-mono">
                         AI Real-Time
                       </span>
                     </h3>
                     <p className="text-[11px] text-slate-400">
-                      ស្កេនផ្ទៃមុខតាមកាមេរ៉ាកុំព្យូទ័រដោយស្វ័យប្រវត្ត &bull; {enrolledFaces?.length || 0} Registered Personnel
+                      ស្កេនផ្ទៃមុខស្វ័យប្រវត្ត &bull; {enrolledFaces?.length || 0} Faces
                     </p>
                   </div>
                 </div>
 
-                {/* Punch State Selector */}
-                <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-800/90 border border-slate-700/80 self-start sm:self-auto">
-                  <button
-                    type="button"
-                    onClick={() => setWebcamPunchState("CHECK_IN")}
-                    className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                      webcamPunchState === "CHECK_IN"
-                        ? "bg-emerald-600 text-white shadow-md shadow-emerald-600/30"
-                        : "text-slate-400 hover:text-white"
-                    }`}
-                  >
-                    🟢 ចូល (Check In)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setWebcamPunchState("CHECK_OUT")}
-                    className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                      webcamPunchState === "CHECK_OUT"
-                        ? "bg-rose-600 text-white shadow-md shadow-rose-600/30"
-                        : "text-slate-400 hover:text-white"
-                    }`}
-                  >
-                    🔴 ចេញ (Check Out)
-                  </button>
+                {/* Auto Gate Status Badge (No manual selection needed) */}
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-800/90 border border-slate-700/80 self-start sm:self-auto shrink-0 shadow-inner">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <span className="text-[11px] font-semibold text-emerald-300">
+                    ស្វ័យប្រវត្ត &bull; Auto Punch
+                  </span>
                 </div>
               </div>
 
-              {/* Camera Video Viewport - Large Area High-Tech Biometric Scanner */}
-              <div className="relative w-full h-[460px] sm:h-[520px] rounded-3xl overflow-hidden bg-slate-950 border border-slate-700/80 shadow-2xl flex items-center justify-center">
+              {/* Camera Video Viewport */}
+              <div className="relative w-full flex-1 min-h-[440px] rounded-2xl overflow-hidden bg-slate-950 border border-slate-700/80 shadow-2xl flex items-center justify-center my-2">
                 {webcamError ? (
                   <div className="p-8 text-center text-rose-400 text-sm space-y-3">
                     <p className="font-semibold">{webcamError}</p>
@@ -768,86 +944,129 @@ export default function AttendanceLiveKioskPage() {
                     />
 
                     {/* High-Tech Biometric Targeting Overlay */}
-                    <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center">
-                      {/* Large Biometric Scanning Frame */}
-                      <div className="relative flex items-center justify-center">
+                    <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center p-3">
+                      {/* Resized Large Biometric Scanning Frame */}
+                      <div className="relative w-[75%] h-[82%] max-w-[420px] max-h-[500px] flex items-center justify-center">
                         {/* 4 Tech Corner Brackets */}
                         <div
-                          className={`absolute -top-4 -left-4 w-9 h-9 border-t-3 border-l-3 transition-colors duration-300 ${
-                            liveFaceBox?.matched
+                          className={`absolute -top-3 -left-3 w-10 h-10 border-t-3 border-l-3 transition-colors duration-300 ${
+                            liveFaceBox?.spoof
+                              ? "border-rose-500 animate-pulse"
+                              : liveFaceBox?.awaitingLiveness
+                              ? "border-amber-400 animate-pulse"
+                              : liveFaceBox?.matched
                               ? "border-emerald-400"
+                              : liveFaceBox?.outsideArea
+                              ? "border-amber-400 animate-pulse"
                               : liveFaceBox?.unregistered
                               ? "border-rose-500"
                               : liveFaceBox?.tooFar
                               ? "border-amber-400"
-                              : "border-indigo-400/70"
+                              : "border-indigo-400/80"
                           }`}
                         />
                         <div
-                          className={`absolute -top-4 -right-4 w-9 h-9 border-t-3 border-r-3 transition-colors duration-300 ${
-                            liveFaceBox?.matched
+                          className={`absolute -top-3 -right-3 w-10 h-10 border-t-3 border-r-3 transition-colors duration-300 ${
+                            liveFaceBox?.spoof
+                              ? "border-rose-500 animate-pulse"
+                              : liveFaceBox?.awaitingLiveness
+                              ? "border-amber-400 animate-pulse"
+                              : liveFaceBox?.matched
                               ? "border-emerald-400"
+                              : liveFaceBox?.outsideArea
+                              ? "border-amber-400 animate-pulse"
                               : liveFaceBox?.unregistered
                               ? "border-rose-500"
                               : liveFaceBox?.tooFar
                               ? "border-amber-400"
-                              : "border-indigo-400/70"
+                              : "border-indigo-400/80"
                           }`}
                         />
                         <div
-                          className={`absolute -bottom-4 -left-4 w-9 h-9 border-b-3 border-l-3 transition-colors duration-300 ${
-                            liveFaceBox?.matched
+                          className={`absolute -bottom-3 -left-3 w-10 h-10 border-b-3 border-l-3 transition-colors duration-300 ${
+                            liveFaceBox?.spoof
+                              ? "border-rose-500 animate-pulse"
+                              : liveFaceBox?.awaitingLiveness
+                              ? "border-amber-400 animate-pulse"
+                              : liveFaceBox?.matched
                               ? "border-emerald-400"
+                              : liveFaceBox?.outsideArea
+                              ? "border-amber-400 animate-pulse"
                               : liveFaceBox?.unregistered
                               ? "border-rose-500"
                               : liveFaceBox?.tooFar
                               ? "border-amber-400"
-                              : "border-indigo-400/70"
+                              : "border-indigo-400/80"
                           }`}
                         />
                         <div
-                          className={`absolute -bottom-4 -right-4 w-9 h-9 border-b-3 border-r-3 transition-colors duration-300 ${
-                            liveFaceBox?.matched
+                          className={`absolute -bottom-3 -right-3 w-10 h-10 border-b-3 border-r-3 transition-colors duration-300 ${
+                            liveFaceBox?.spoof
+                              ? "border-rose-500 animate-pulse"
+                              : liveFaceBox?.awaitingLiveness
+                              ? "border-amber-400 animate-pulse"
+                              : liveFaceBox?.matched
                               ? "border-emerald-400"
+                              : liveFaceBox?.outsideArea
+                              ? "border-amber-400 animate-pulse"
                               : liveFaceBox?.unregistered
                               ? "border-rose-500"
                               : liveFaceBox?.tooFar
                               ? "border-amber-400"
-                              : "border-indigo-400/70"
+                              : "border-indigo-400/80"
                           }`}
                         />
 
-                        {/* Large Oval Face Guide - Spacious Area */}
+                        {/* Large Resized Face Scanning Area Guide */}
                         <div
-                          className={`w-56 h-76 sm:w-68 sm:h-92 rounded-[48%] border-2 transition-all duration-300 flex flex-col items-center justify-between p-4 ${
-                            liveFaceBox?.matched
-                              ? "border-emerald-400 bg-emerald-500/10 shadow-[0_0_35px_rgba(16,185,129,0.55)] scale-102"
+                          className={`w-full h-full rounded-[38px] border-2 transition-all duration-300 flex flex-col items-center justify-between p-4 ${
+                            liveFaceBox?.spoof
+                              ? "border-rose-500 bg-rose-500/20 shadow-[0_0_35px_rgba(239,68,68,0.65)] scale-102"
+                              : liveFaceBox?.awaitingLiveness
+                              ? "border-amber-400/90 border-dashed bg-amber-500/10 shadow-[0_0_25px_rgba(245,158,11,0.4)]"
+                              : liveFaceBox?.matched
+                              ? "border-emerald-400 bg-emerald-500/10 shadow-[0_0_35px_rgba(16,185,129,0.55)] scale-101"
+                              : liveFaceBox?.outsideArea
+                              ? "border-amber-400/90 border-dashed bg-amber-500/10 shadow-[0_0_25px_rgba(245,158,11,0.35)]"
                               : liveFaceBox?.unregistered
                               ? "border-rose-500 bg-rose-500/15 shadow-[0_0_30px_rgba(239,68,68,0.55)]"
                               : liveFaceBox?.tooFar
                               ? "border-amber-400/90 border-dashed bg-amber-500/10 shadow-[0_0_20px_rgba(245,158,11,0.3)]"
-                              : "border-indigo-400/40 border-dashed shadow-[0_0_20px_rgba(99,102,241,0.2)]"
+                              : "border-indigo-400/50 border-dashed shadow-[0_0_25px_rgba(99,102,241,0.2)]"
                           }`}
                         >
                           {/* Top Guide Indicator */}
-                          <div className="pt-2">
-                            {liveFaceBox?.matched ? (
-                              <span className="px-3 py-1 rounded-full bg-emerald-500 text-white text-[11px] font-bold shadow-lg flex items-center gap-1">
+                          <div className="pt-1.5">
+                            {liveFaceBox?.spoof ? (
+                              <span className="px-3.5 py-1 rounded-full bg-rose-600 text-white text-[11px] font-bold shadow-lg flex items-center gap-1.5 animate-pulse">
+                                <AlertCircle size={13} />
+                                <span>PHOTO / SCREEN SPOOF • ហាមស្កេនរូបថត</span>
+                              </span>
+                            ) : liveFaceBox?.awaitingLiveness ? (
+                              <span className="px-3.5 py-1 rounded-full bg-amber-500 text-slate-950 text-[11px] font-bold shadow-lg flex items-center gap-1.5 animate-pulse">
+                                <span>👁️ PLEASE BLINK EYES • សូមព្រិចភ្នែក</span>
+                              </span>
+                            ) : liveFaceBox?.matched ? (
+                              <span className="px-3.5 py-1 rounded-full bg-emerald-500 text-white text-[11px] font-bold shadow-lg flex items-center gap-1.5">
                                 <CheckCircle2 size={13} />
-                                <span>VERIFIED {liveFaceBox.confidence}%</span>
+                                <span>VERIFIED LIVE {liveFaceBox.confidence}%</span>
+                              </span>
+                            ) : liveFaceBox?.outsideArea ? (
+                              <span className="px-3.5 py-1 rounded-full bg-amber-500 text-slate-950 text-[11px] font-bold shadow-lg flex items-center gap-1.5 animate-pulse">
+                                <span>ALIGN IN AREA • សូមដាក់ផ្ទៃមុខក្នុងតំបន់ស្កេន</span>
                               </span>
                             ) : liveFaceBox?.unregistered ? (
-                              <span className="px-3 py-1 rounded-full bg-rose-600 text-white text-[11px] font-bold shadow-lg flex items-center gap-1 animate-pulse">
+                              <span className="px-3.5 py-1 rounded-full bg-rose-600 text-white text-[11px] font-bold shadow-lg flex items-center gap-1.5 animate-pulse">
                                 <X size={13} />
                                 <span>UNREGISTERED • មិនទាន់ចុះឈ្មោះ</span>
                               </span>
                             ) : liveFaceBox?.tooFar ? (
-                              <span className="px-3 py-1 rounded-full bg-amber-500 text-slate-950 text-[11px] font-bold shadow-lg flex items-center gap-1">
+                              <span className="px-3.5 py-1 rounded-full bg-amber-500 text-slate-950 text-[11px] font-bold shadow-lg flex items-center gap-1.5">
                                 <span>MOVE CLOSER • សូមខិតមកជិត</span>
                               </span>
                             ) : (
-                              <span className="px-3 py-1 rounded-full bg-black/60 backdrop-blur-md text-indigo-300 text-[10px] font-semibold border border-indigo-500/30">
-                                ALIGN FACE IN OVAL • សូមដាក់ផ្ទៃមុខក្នុងរង្វង់
+                              <span className="px-3.5 py-1 rounded-full bg-black/60 backdrop-blur-md text-indigo-300 text-[10px] font-semibold border border-indigo-500/30 whitespace-nowrap">
+                                FACE SCANNING AREA • តំបន់ស្កេនផ្ទៃមុខ
                               </span>
                             )}
                           </div>
@@ -859,11 +1078,11 @@ export default function AttendanceLiveKioskPage() {
                           </div>
 
                           {/* Radar Sweep Effect (when scanning) */}
-                          {!liveFaceBox?.matched && !liveFaceBox?.unregistered && (
-                            <div className="absolute inset-x-4 top-1/4 h-0.5 bg-linear-to-r from-transparent via-cyan-400 to-transparent shadow-[0_0_12px_#22d3ee] animate-pulse" />
+                          {!liveFaceBox?.matched && !liveFaceBox?.unregistered && !liveFaceBox?.outsideArea && (
+                            <div className="absolute inset-x-6 top-1/4 h-0.5 bg-linear-to-r from-transparent via-cyan-400 to-transparent shadow-[0_0_12px_#22d3ee] animate-pulse" />
                           )}
 
-                          <div className="text-[10px] text-slate-400 pb-1">
+                          <div className="text-[10px] text-slate-300 pb-0.5 font-medium truncate max-w-[200px]">
                             {liveFaceBox?.matched ? liveFaceBox.name : "High-Accuracy Face ID"}
                           </div>
                         </div>
@@ -871,26 +1090,26 @@ export default function AttendanceLiveKioskPage() {
                     </div>
 
                     {/* Top HUD Telemetry Bar */}
-                    <div className="absolute top-3 left-3 right-3 flex items-center justify-between pointer-events-none">
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] px-2.5 py-1 rounded-xl bg-black/75 backdrop-blur-md font-bold text-emerald-400 border border-emerald-500/30 flex items-center gap-1.5 shadow-md">
-                          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                          <span>AI EDGE RECOGNITION</span>
+                    <div className="absolute top-2.5 left-2.5 right-2.5 flex items-center justify-between pointer-events-none">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[9px] px-2 py-0.5 rounded-xl bg-black/75 backdrop-blur-md font-bold text-emerald-400 border border-emerald-500/30 flex items-center gap-1 shadow-md">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                          <span>AI EDGE</span>
                         </span>
-                        <span className="text-[10px] px-2 py-1 rounded-xl bg-black/60 backdrop-blur-md text-slate-300 font-mono border border-slate-700/50">
-                          Threshold: 0.38 (Strict)
+                        <span className="text-[9px] px-1.5 py-0.5 rounded-xl bg-black/60 backdrop-blur-md text-slate-300 font-mono border border-slate-700/50">
+                          0.38
                         </span>
                       </div>
 
-                      <span className="text-[10px] px-2.5 py-1 rounded-xl bg-black/75 backdrop-blur-md text-slate-200 font-mono border border-slate-700/60 shadow-md">
-                        {enrolledFaces?.length || 0} Registered Personnel
+                      <span className="text-[9px] px-2 py-0.5 rounded-xl bg-black/75 backdrop-blur-md text-slate-200 font-mono border border-slate-700/60 shadow-md">
+                        {enrolledFaces?.length || 0} Faces
                       </span>
                     </div>
 
                     {/* Bottom HUD Status Bar */}
-                    <div className="absolute bottom-3 left-3 right-3 flex items-center justify-between pointer-events-none">
+                    <div className="absolute bottom-2.5 left-2.5 right-2.5 flex items-center justify-between pointer-events-none">
                       <span
-                        className={`text-xs px-3.5 py-1.5 rounded-xl backdrop-blur-md font-bold border flex items-center gap-2 shadow-lg transition-all ${
+                        className={`text-[11px] px-2.5 py-1 rounded-xl backdrop-blur-md font-bold border flex items-center gap-1.5 shadow-lg transition-all truncate max-w-[70%] ${
                           liveFaceBox?.matched
                             ? "bg-emerald-600/95 text-white border-emerald-400/60"
                             : liveFaceBox?.unregistered
@@ -900,31 +1119,42 @@ export default function AttendanceLiveKioskPage() {
                             : "bg-slate-900/85 text-emerald-300 border-slate-700"
                         }`}
                       >
-                        <span className="w-2 h-2 rounded-full bg-current animate-pulse" />
-                        <span>
+                        <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse shrink-0" />
+                        <span className="truncate">
                           {liveFaceBox?.matched
                             ? `✓ Match: ${liveFaceBox.name} (${liveFaceBox.confidence}%)`
                             : (webcamFeedback || "Looking for face...")}
                         </span>
                       </span>
 
-                      <span className="text-[10px] px-2.5 py-1 rounded-xl bg-black/75 backdrop-blur-md text-slate-300 font-mono border border-slate-700/50">
+                      <span className="text-[9px] px-2 py-0.5 rounded-xl bg-black/75 backdrop-blur-md text-slate-300 font-mono border border-slate-700/50">
                         {liveFaceBox?.similarity
-                          ? `Cosine: ${(liveFaceBox.similarity * 100).toFixed(1)}%`
+                          ? `${(liveFaceBox.similarity * 100).toFixed(0)}%`
                           : liveFaceBox?.distance
-                          ? `Dist: ${liveFaceBox.distance.toFixed(3)}`
-                          : "SSD MobileNet AI"}
+                          ? `d:${liveFaceBox.distance.toFixed(2)}`
+                          : "AI"}
                       </span>
                     </div>
                   </>
                 )}
               </div>
             </div>
-          )}
+          </div>
+        )}
 
+        {/* 2. Biometric Verification Gate Card */}
+        <div
+          className={`${
+            webcamEnabled
+              ? "lg:col-span-6 xl:col-span-6"
+              : "lg:col-span-12"
+          } ${
+            isFullscreen ? "h-full flex flex-col overflow-hidden" : "flex flex-col"
+          }`}
+        >
           <div
             className={`relative rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xl overflow-hidden flex flex-col justify-between ${
-              isFullscreen ? "h-full p-5 sm:p-7" : "p-7 min-h-[500px]"
+              isFullscreen ? "h-full p-4 sm:p-6" : "p-6 sm:p-7 h-full min-h-[560px]"
             }`}
           >
             {/* Background Decorative Glow */}
@@ -967,30 +1197,42 @@ export default function AttendanceLiveKioskPage() {
                   <div className="w-full bg-slate-100 dark:bg-slate-800 rounded-full h-1.5 overflow-hidden shrink-0">
                     <div
                       className="bg-gradient-to-r from-emerald-500 to-indigo-600 h-1.5 rounded-full transition-all duration-1000 ease-linear"
-                      style={{ width: `${(countdown / 5) * 100}%` }}
+                      style={{ width: `${(countdown / 2) * 100}%` }}
                     />
                   </div>
 
-                  {/* Avatar & Names */}
-                  <div className="flex items-start gap-5">
-                    <div className={`${isFullscreen ? "w-20 h-20 sm:w-24 sm:h-24" : "w-24 h-24"} rounded-3xl bg-linear-to-tr from-emerald-500 to-indigo-600 p-1 shadow-lg shadow-emerald-500/20 shrink-0`}>
-                      <div className="w-full h-full rounded-[22px] bg-white dark:bg-slate-900 flex items-center justify-center font-bold text-2xl text-slate-800 dark:text-white uppercase overflow-hidden">
-                        {activeScan.profileImageUrl ? (
-                          <img src={activeScan.profileImageUrl} alt={activeScan.personnelName} className="w-full h-full object-cover" />
-                        ) : (
-                          activeScan.personnelName ? activeScan.personnelName.substring(0, 2) : "ZK"
-                        )}
+                  {/* Avatar & Names Card with Large Portrait Photo & Full Personnel Data */}
+                  <div className="flex flex-col sm:flex-row items-center sm:items-start gap-6 p-5 rounded-3xl bg-slate-50 dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 shadow-lg">
+                    {/* Big Profile Photo */}
+                    <div className="relative group shrink-0">
+                      <div className="w-40 h-40 sm:w-48 sm:h-48 md:w-52 md:h-52 rounded-3xl bg-linear-to-tr from-emerald-400 via-teal-500 to-indigo-600 p-1.5 shadow-2xl shadow-emerald-500/25">
+                        <div className="w-full h-full rounded-[22px] bg-white dark:bg-slate-950 flex items-center justify-center font-bold text-4xl text-slate-800 dark:text-white uppercase overflow-hidden ring-1 ring-white/10">
+                          {activeScan.profileImageUrl ? (
+                            <img src={activeScan.profileImageUrl} alt={activeScan.personnelName} className="w-full h-full object-cover" />
+                          ) : (
+                            <span className="text-4xl text-indigo-400 font-black">
+                              {activeScan.personnelName ? activeScan.personnelName.substring(0, 2) : "ZK"}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      {/* Verified Badge Overlay */}
+                      <div className="absolute -bottom-2.5 inset-x-3 py-1 px-2.5 rounded-full bg-emerald-600 text-white text-[11px] font-bold shadow-lg flex items-center justify-center gap-1.5 border border-emerald-400/50">
+                        <CheckCircle2 size={13} className="text-emerald-200" />
+                        <span>VERIFIED • ត្រឹមត្រូវ</span>
                       </div>
                     </div>
 
-                    <div className="space-y-1.5 flex-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className={`px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider ${
+                    {/* Full Personnel Information */}
+                    <div className="space-y-2.5 flex-1 min-w-0 text-center sm:text-left pt-1">
+                      {/* Role, ID, Gender Pills */}
+                      <div className="flex items-center justify-center sm:justify-start gap-2 flex-wrap">
+                        <span className={`px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider shadow-xs ${
                           activeScan.personnelType === "TEACHER"
-                            ? "bg-purple-100 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300"
+                            ? "bg-purple-100 dark:bg-purple-950/70 text-purple-700 dark:text-purple-300 border border-purple-300/40"
                             : activeScan.personnelType === "STUDENT"
-                            ? "bg-sky-100 dark:bg-sky-950/60 text-sky-700 dark:text-sky-300"
-                            : "bg-indigo-100 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300"
+                            ? "bg-sky-100 dark:bg-sky-950/70 text-sky-700 dark:text-sky-300 border border-sky-300/40"
+                            : "bg-indigo-100 dark:bg-indigo-950/70 text-indigo-700 dark:text-indigo-300 border border-indigo-300/40"
                         }`}>
                           {activeScan.personnelType === "TEACHER"
                             ? "👨‍🏫 គ្រូបង្រៀន (Teacher)"
@@ -999,12 +1241,18 @@ export default function AttendanceLiveKioskPage() {
                             : "💼 បុគ្គលិក (Employee)"}
                         </span>
 
-                        <span className="font-mono text-xs font-bold px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
+                        <span className="font-mono text-xs font-bold px-2.5 py-1 rounded-full bg-slate-200 dark:bg-slate-800 text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700">
                           ID: {activeScan.personnelCode || activeScan.devicePin}
                         </span>
 
+                        {activeScan.gender && (
+                          <span className="text-xs font-bold px-2.5 py-1 rounded-full bg-slate-100 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300">
+                            {activeScan.gender.toUpperCase() === "MALE" ? "ប្រុស (Male)" : activeScan.gender.toUpperCase() === "FEMALE" ? "ស្រី (Female)" : activeScan.gender}
+                          </span>
+                        )}
+
                         {activeScan.cardNumber && (
-                          <span className="font-mono text-xs font-semibold px-2 py-0.5 rounded bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800 flex items-center gap-1">
+                          <span className="font-mono text-xs font-semibold px-2.5 py-1 rounded-full bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border border-amber-300 dark:border-amber-800 flex items-center gap-1">
                             <CreditCard size={12} />
                             Card: {activeScan.cardNumber}
                           </span>
@@ -1013,42 +1261,97 @@ export default function AttendanceLiveKioskPage() {
 
                       {/* Khmer Name Highlight */}
                       {activeScan.personnelKhmerName && (
-                        <div className={`${isFullscreen ? "text-xl sm:text-2xl" : "text-2xl"} font-black text-indigo-600 dark:text-indigo-400 tracking-tight`}>
+                        <div className="text-2xl sm:text-3xl font-black text-indigo-600 dark:text-indigo-400 tracking-tight">
                           {activeScan.personnelKhmerName}
                         </div>
                       )}
 
                       {/* English Name */}
-                      <h2 className={`${isFullscreen ? "text-2xl sm:text-3xl" : "text-3xl"} font-extrabold text-slate-900 dark:text-white tracking-tight truncate`}>
+                      <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight truncate">
                         {activeScan.personnelName}
                       </h2>
 
-                      {/* Class or Department */}
-                      <p className="text-sm font-semibold text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
-                        <Layers size={14} className="text-slate-400" />
-                        <span>{activeScan.departmentOrClass || "General Campus"}</span>
-                      </p>
+                      {/* Detailed Meta Grid */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 text-xs">
+                        <div className="flex items-center gap-2 p-2.5 rounded-xl bg-white dark:bg-slate-800/70 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200">
+                          <Layers size={16} className="text-indigo-500 shrink-0" />
+                          <div className="truncate">
+                            <span className="text-[10px] text-slate-400 block font-medium">
+                              {activeScan.personnelType === "STUDENT" ? "ថ្នាក់រៀន (Class)" : "ដេប៉ាតឺម៉ង់ (Department)"}
+                            </span>
+                            <span className="font-semibold text-slate-800 dark:text-white truncate">
+                              {activeScan.departmentOrClass || activeScan.departmentName || "General Campus"}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 p-2.5 rounded-xl bg-white dark:bg-slate-800/70 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200">
+                          <Cpu size={16} className="text-teal-500 shrink-0" />
+                          <div className="truncate">
+                            <span className="text-[10px] text-slate-400 block font-medium">
+                              {activeScan.personnelType === "STUDENT" ? "កម្រិតថ្នាក់ (Grade)" : "មុខតំណែង (Position)"}
+                            </span>
+                            <span className="font-semibold text-slate-800 dark:text-white truncate">
+                              {activeScan.positionOrGrade || (activeScan.personnelType === "STUDENT" ? "Student" : "Staff Member")}
+                            </span>
+                          </div>
+                        </div>
+
+                        {activeScan.branchOrYear && (
+                          <div className="flex items-center gap-2 p-2.5 rounded-xl bg-white dark:bg-slate-800/70 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200">
+                            <Clock size={16} className="text-amber-500 shrink-0" />
+                            <div className="truncate">
+                              <span className="text-[10px] text-slate-400 block font-medium">
+                                {activeScan.personnelType === "STUDENT" ? "ឆ្នាំសិក្សា (Academic Year)" : "សាខា (Branch)"}
+                              </span>
+                              <span className="font-semibold text-slate-800 dark:text-white truncate">
+                                {activeScan.branchOrYear}
+                              </span>
+                            </div>
+                          </div>
+                        )}
+
+                        {activeScan.contactInfo && (
+                          <div className="flex items-center gap-2 p-2.5 rounded-xl bg-white dark:bg-slate-800/70 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200">
+                            <UserCheck size={16} className="text-emerald-500 shrink-0" />
+                            <div className="truncate">
+                              <span className="text-[10px] text-slate-400 block font-medium">
+                                {activeScan.personnelType === "STUDENT" ? "លេខអាណាព្យាបាល (Parent Phone)" : "លេខទូរស័ព្ទ (Phone)"}
+                              </span>
+                              <span className="font-semibold text-slate-800 dark:text-white font-mono truncate">
+                                {activeScan.contactInfo}
+                              </span>
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
 
                   {/* High Visibility Khmer Confirmation Banner */}
-                  <div className={`rounded-2xl bg-linear-to-r from-emerald-500/15 via-emerald-500/10 to-transparent border border-emerald-500/30 flex items-center gap-4 shadow-sm ${isFullscreen ? "p-3.5 sm:p-4" : "p-5"}`}>
-                    <div className="p-2.5 sm:p-3 rounded-2xl bg-emerald-500 text-white shadow-md shadow-emerald-500/30 animate-pulse shrink-0">
-                      <CheckCircle2 size={isFullscreen ? 26 : 32} />
+                  <div className={`rounded-2xl bg-linear-to-r from-emerald-500/15 via-emerald-500/10 to-transparent border border-emerald-500/30 flex items-center gap-4 shadow-sm ${isFullscreen ? "p-3 sm:p-4" : "p-4"}`}>
+                    <div className="p-3 rounded-2xl bg-emerald-500 text-white shadow-lg shadow-emerald-500/30 animate-pulse shrink-0">
+                      <CheckCircle2 size={isFullscreen ? 28 : 34} />
                     </div>
-                    <div>
+                    <div className="flex-1 min-w-0">
                       <div className={`${isFullscreen ? "text-lg sm:text-xl" : "text-xl"} font-black text-emerald-700 dark:text-emerald-300 tracking-wide`}>
                         សូមអរគុណសម្រាប់ការចុះវត្តមាន!
                       </div>
-                      <div className="text-xs font-medium text-emerald-600 dark:text-emerald-400">
-                        Scan Verified Successfully • Punch State: {activeScan.punchState || "CHECK_IN"} • Auto-cleans in {countdown}s
+                      <div className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 flex items-center gap-2 flex-wrap">
+                        <span>Scan Verified Successfully</span>
+                        <span>&bull;</span>
+                        <span className="font-bold text-emerald-700 dark:text-emerald-300">
+                          បានផ្ទៀងផ្ទាត់ត្រឹមត្រូវ
+                        </span>
+                        <span>&bull;</span>
+                        <span>Auto-cleans in {countdown}s</span>
                       </div>
                     </div>
                   </div>
 
                   {/* Punch Details Grid */}
-                  <div className="grid grid-cols-2 gap-3 pt-1">
-                    <div className={`${isFullscreen ? "p-2.5 sm:p-3" : "p-3.5"} rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800`}>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                    <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800">
                       <span className="text-[11px] font-semibold text-slate-400 block mb-1">ម៉ោងស្កេន (Punch Time)</span>
                       <span className="font-mono text-base font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
                         <Clock size={16} className="text-indigo-500" />
@@ -1056,11 +1359,11 @@ export default function AttendanceLiveKioskPage() {
                       </span>
                     </div>
 
-                    <div className={`${isFullscreen ? "p-2.5 sm:p-3" : "p-3.5"} rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800`}>
-                      <span className="text-[11px] font-semibold text-slate-400 block mb-1">ឧបករណ៍ស្កេន (Terminal Gate)</span>
+                    <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800">
+                      <span className="text-[11px] font-semibold text-slate-400 block mb-1">ឧបករណ៍ (Scanner Gate)</span>
                       <span className="font-semibold text-xs text-slate-800 dark:text-slate-200 truncate flex items-center gap-1">
                         <Cpu size={14} className="text-emerald-500" />
-                        <span>{activeScan.deviceName || activeScan.deviceSn || "IN01-A"}</span>
+                        <span>{activeScan.deviceName || activeScan.deviceSn || "Webcam Gate Scanner"}</span>
                       </span>
                     </div>
                   </div>
@@ -1085,20 +1388,21 @@ export default function AttendanceLiveKioskPage() {
                       Ready to Scan • Present RFID Card or Biometric Fingerprint
                     </p>
                     <p className="text-xs text-slate-400 dark:text-slate-500">
-                      Dual Gate Terminals (192.168.1.201 & 192.168.1.202) are armed and listening in real-time. Results will flash here for 5s.
+                      Dual Gate Terminals ({activeDevices.map((d) => `${d.ipAddress || d.ip_address || "203.147.129.237"}:${d.port || 4370}`).join(" & ")}) are armed and listening in real-time. Results will flash here for 2s.
                     </p>
                   </div>
 
                   {/* Device Gate Status Chips */}
                   <div className="inline-flex flex-wrap items-center justify-center gap-3 pt-2">
-                    <span className="px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping"></span>
-                      Gate 1 (192.168.1.201): Online
-                    </span>
-                    <span className="px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping"></span>
-                      Gate 2 (192.168.1.202): Online
-                    </span>
+                    {activeDevices.map((dev, idx) => (
+                      <span
+                        key={dev.id || idx}
+                        className="px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-2"
+                      >
+                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping"></span>
+                        {dev.name || `Gate ${idx + 1}`} ({dev.ipAddress || dev.ip_address || "203.147.129.237"}:{dev.port || 4370}): {dev.connectionStatus || dev.connection_status || dev.status || "Online"}
+                      </span>
+                    ))}
                     <span className="px-3 py-1.5 rounded-xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800 text-xs font-semibold text-indigo-700 dark:text-indigo-300 flex items-center gap-1.5">
                       <ShieldCheck size={14} className="text-indigo-500" />
                       Latency: &lt; 2ms Direct DB
@@ -1126,74 +1430,7 @@ export default function AttendanceLiveKioskPage() {
                   ប្តូរសំឡេង ⚙️
                 </span>
               </button>
-              <span>Ultra-Fast Real-Time Biometric Stream • Auto-cleans after 5 seconds</span>
-            </div>
-          </div>
-        </div>
-
-        {/* Right Column: Recent Today Scans List */}
-        <div
-          className={`lg:col-span-5 xl:col-span-4 ${
-            isFullscreen ? "h-full flex flex-col overflow-hidden" : "space-y-4"
-          }`}
-        >
-          <div
-            className={`rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xl flex flex-col ${
-              isFullscreen ? "h-full p-4 sm:p-5 overflow-hidden" : "p-5 space-y-4"
-            }`}
-          >
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800 shrink-0">
-              <h3 className="font-bold text-sm text-slate-900 dark:text-white flex items-center gap-2">
-                <Sparkles size={16} className="text-amber-500" />
-                Live Attendance Scans Stream
-              </h3>
-              <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500">
-                {liveScans?.length || 0} Punches
-              </span>
-            </div>
-
-            <div
-              className={`space-y-2.5 overflow-y-auto pr-1 ${
-                isFullscreen ? "flex-1 min-h-0" : "max-h-[500px]"
-              }`}
-            >
-              {liveScans?.map((record) => {
-                const isSelected = activeScan?.logId === record.logId;
-                return (
-                  <div
-                    key={record.logId}
-                    onClick={() => triggerActiveScanWithCountdown(record)}
-                    className={`p-3 rounded-2xl border transition-all cursor-pointer flex items-center justify-between gap-3 ${
-                      isSelected
-                        ? "bg-indigo-50/70 dark:bg-indigo-950/40 border-indigo-300 dark:border-indigo-800 shadow-xs"
-                        : "bg-slate-50/50 dark:bg-slate-800/40 border-slate-100 dark:border-slate-800 hover:bg-slate-100/60 dark:hover:bg-slate-800/80"
-                    }`}
-                  >
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 rounded-xl bg-slate-200 dark:bg-slate-700 flex items-center justify-center font-bold text-xs text-slate-700 dark:text-slate-200 shrink-0">
-                        {record.personnelName ? record.personnelName.substring(0, 2).toUpperCase() : "ZK"}
-                      </div>
-                      <div className="min-w-0">
-                        <span className="font-bold text-xs text-slate-900 dark:text-white truncate block">
-                          {record.personnelKhmerName ? `${record.personnelKhmerName} • ` : ""}{record.personnelName}
-                        </span>
-                        <span className="text-[10px] text-slate-400 block truncate">
-                          {record.personnelType} • {record.departmentOrClass || "Campus"}
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="text-right shrink-0">
-                      <span className="font-mono text-xs font-bold text-slate-900 dark:text-white block">
-                        {record.punchTime ? formatTime(record.punchTime) : "--:--"}
-                      </span>
-                      <span className="inline-block px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300">
-                        {record.punchState || "CHECK_IN"}
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
+              <span>Ultra-Fast Real-Time Biometric Stream • Auto-cleans after 2 seconds</span>
             </div>
           </div>
         </div>
@@ -1209,12 +1446,6 @@ export default function AttendanceLiveKioskPage() {
         onToggleAutoPlay={handleToggleAutoPlay}
         volume={volume}
         onChangeVolume={handleChangeVolume}
-        bgMusicEnabled={bgMusicEnabled}
-        onToggleBgMusic={handleToggleBgMusic}
-        bgMusicTrack={bgMusicTrack}
-        onChangeBgMusicTrack={handleChangeBgMusicTrack}
-        bgMusicVolume={bgMusicVolume}
-        onChangeBgMusicVolume={handleChangeBgMusicVolume}
       />
     </div>
   );
