@@ -31,8 +31,10 @@ public class EmployeeController {
             @RequestParam(required = false) Long departmentId,
             @RequestParam(required = false) Long branchId,
             @RequestParam(required = false) String status,
+            @RequestParam(required = false) String staffType,
+            @RequestParam(required = false) Boolean isTeacher,
             @PageableDefault(size = 15, sort = "id") Pageable pageable) {
-        return ResponseEntity.ok(ApiResponse.ok(employeeService.getEmployees(search, departmentId, branchId, status, pageable)));
+        return ResponseEntity.ok(ApiResponse.ok(employeeService.getEmployees(search, departmentId, branchId, status, staffType, isTeacher, pageable)));
     }
 
     @GetMapping("/next-code")
@@ -40,6 +42,16 @@ public class EmployeeController {
     @Operation(summary = "Get next unique auto-generated employee/personnel code")
     public ResponseEntity<ApiResponse<java.util.Map<String, String>>> getNextEmployeeCode() {
         return ResponseEntity.ok(ApiResponse.ok(java.util.Map.of("nextCode", employeeService.getNextEmployeeCode())));
+    }
+
+    @GetMapping("/next-id-number")
+    @PreAuthorize("hasAuthority('employee.read') or hasRole('SUPER_ADMIN') or hasRole('ADMIN') or hasRole('HR_MANAGER')")
+    @Operation(summary = "Get next unique auto-generated employee institutional ID (e.g. FBISS260001)")
+    public ResponseEntity<ApiResponse<java.util.Map<String, String>>> getNextEmployeeIdNumber(
+            @RequestParam(required = false) String year,
+            @RequestParam(required = false, defaultValue = "EMPLOYEE") String staffType) {
+        String nextId = employeeService.getNextEmployeeIdNumber(staffType, year);
+        return ResponseEntity.ok(ApiResponse.ok(java.util.Map.of("nextIdNumber", nextId)));
     }
 
     @GetMapping("/{id}")

@@ -26,11 +26,12 @@ public class UserController {
 
     @GetMapping
     @PreAuthorize("hasAuthority('user.read') or hasRole('SUPER_ADMIN') or hasRole('ADMIN')")
-    @Operation(summary = "Get paginated users list with search")
+    @Operation(summary = "Get paginated users list with search and optional companyCode")
     public ResponseEntity<ApiResponse<PageResponse<UserDto>>> getUsers(
             @RequestParam(required = false) String search,
+            @RequestParam(required = false) String companyCode,
             @PageableDefault(size = 15, sort = "id") Pageable pageable) {
-        return ResponseEntity.ok(ApiResponse.ok(userService.getUsers(search, pageable)));
+        return ResponseEntity.ok(ApiResponse.ok(userService.getUsers(search, companyCode, pageable)));
     }
 
     @GetMapping("/{id}")

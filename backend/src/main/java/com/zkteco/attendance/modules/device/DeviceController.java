@@ -120,7 +120,7 @@ public class DeviceController {
     }
 
     @PostMapping("/{id}/restart")
-    @PreAuthorize("hasAuthority('device.restart') or hasRole('SUPER_ADMIN')")
+    @PreAuthorize("hasAuthority('device.restart') or hasRole('SUPER_ADMIN') or hasRole('ADMIN')")
     @Operation(summary = "Restart terminal remotely")
     public ResponseEntity<ApiResponse<Boolean>> restartDevice(@PathVariable Long id) {
         boolean rebooted = deviceService.restartDevice(id);
@@ -186,6 +186,14 @@ public class DeviceController {
     @Operation(summary = "Download all attendance logs from terminal into database and wipe terminal buffer to free memory")
     public ResponseEntity<ApiResponse<Map<String, Object>>> backupAndClearDeviceLogs(@PathVariable Long id) {
         Map<String, Object> result = deviceService.backupAndClearDeviceLogs(id);
+        return ResponseEntity.ok(ApiResponse.ok((String) result.get("message"), result));
+    }
+
+    @PostMapping("/{id}/wipe-data")
+    @PreAuthorize("hasAuthority('device.update') or hasRole('SUPER_ADMIN') or hasRole('ADMIN')")
+    @Operation(summary = "Wipe all terminal hardware data (users, biometrics, punch logs) to empty")
+    public ResponseEntity<ApiResponse<Map<String, Object>>> wipeDeviceData(@PathVariable Long id) {
+        Map<String, Object> result = deviceService.wipeDeviceData(id);
         return ResponseEntity.ok(ApiResponse.ok((String) result.get("message"), result));
     }
 }

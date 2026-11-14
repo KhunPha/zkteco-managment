@@ -22,18 +22,30 @@ public class OrganizationService {
     // Branches
     @Transactional(readOnly = true)
     public List<BranchDto> getAllBranches() {
-        return branchRepository.findAll().stream().map(this::toBranchDto).collect(Collectors.toList());
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        List<Branch> list = "all".equalsIgnoreCase(activeTenant)
+                ? branchRepository.findAll()
+                : branchRepository.findByCompanyCode(activeTenant.trim().toLowerCase());
+        return list.stream().map(this::toBranchDto).collect(Collectors.toList());
     }
 
     @Transactional(readOnly = true)
     public BranchDto getBranchById(Long id) {
-        return toBranchDto(branchRepository.findById(id)
-                .orElseThrow(() -> new ResourceNotFoundException("Branch", "id", id)));
+        Branch branch = branchRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Branch", "id", id));
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if (!"all".equalsIgnoreCase(activeTenant) && !activeTenant.equalsIgnoreCase(branch.getCompanyCode())) {
+            throw new ResourceNotFoundException("Branch", "id", id);
+        }
+        return toBranchDto(branch);
     }
 
     @Transactional
     public BranchDto createBranch(CreateBranchRequest request) {
-        if (branchRepository.existsByCode(request.getCode())) {
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if ("all".equalsIgnoreCase(activeTenant)) activeTenant = "default";
+
+        if (branchRepository.existsByCompanyCodeAndCode(activeTenant, request.getCode().trim().toUpperCase())) {
             throw new AppException(ErrorCode.DUPLICATE_RESOURCE, "Branch code already exists: " + request.getCode());
         }
         Branch branch = Branch.builder()
@@ -43,6 +55,7 @@ public class OrganizationService {
                 .phone(request.getPhone())
                 .email(request.getEmail())
                 .active(request.getActive() != null ? request.getActive() : true)
+                .companyCode(activeTenant)
                 .build();
         return toBranchDto(branchRepository.save(branch));
     }
@@ -51,6 +64,10 @@ public class OrganizationService {
     public BranchDto updateBranch(Long id, CreateBranchRequest request) {
         Branch branch = branchRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Branch", "id", id));
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if (!"all".equalsIgnoreCase(activeTenant) && !activeTenant.equalsIgnoreCase(branch.getCompanyCode())) {
+            throw new ResourceNotFoundException("Branch", "id", id);
+        }
 
         branch.setName(request.getName().trim());
         branch.setAddress(request.getAddress());
@@ -63,24 +80,42 @@ public class OrganizationService {
 
     @Transactional
     public void deleteBranch(Long id) {
-        branchRepository.deleteById(id);
+        Branch branch = branchRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Branch", "id", id));
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if (!"all".equalsIgnoreCase(activeTenant) && !activeTenant.equalsIgnoreCase(branch.getCompanyCode())) {
+            throw new ResourceNotFoundException("Branch", "id", id);
+        }
+        branchRepository.delete(branch);
     }
 
     // Departments
     @Transactional(readOnly = true)
     public List<DepartmentDto> getAllDepartments() {
-        return departmentRepository.findAll().stream().map(this::toDepartmentDto).collect(Collectors.toList());
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        List<Department> list = "all".equalsIgnoreCase(activeTenant)
+                ? departmentRepository.findAll()
+                : departmentRepository.findByCompanyCode(activeTenant.trim().toLowerCase());
+        return list.stream().map(this::toDepartmentDto).collect(Collectors.toList());
     }
 
     @Transactional(readOnly = true)
     public DepartmentDto getDepartmentById(Long id) {
-        return toDepartmentDto(departmentRepository.findById(id)
-                .orElseThrow(() -> new ResourceNotFoundException("Department", "id", id)));
+        Department dept = departmentRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Department", "id", id));
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if (!"all".equalsIgnoreCase(activeTenant) && !activeTenant.equalsIgnoreCase(dept.getCompanyCode())) {
+            throw new ResourceNotFoundException("Department", "id", id);
+        }
+        return toDepartmentDto(dept);
     }
 
     @Transactional
     public DepartmentDto createDepartment(CreateDepartmentRequest request) {
-        if (departmentRepository.existsByCode(request.getCode())) {
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if ("all".equalsIgnoreCase(activeTenant)) activeTenant = "default";
+
+        if (departmentRepository.existsByCompanyCodeAndCode(activeTenant, request.getCode().trim().toUpperCase())) {
             throw new AppException(ErrorCode.DUPLICATE_RESOURCE, "Department code already exists: " + request.getCode());
         }
         Branch branch = request.getBranchId() != null
@@ -96,6 +131,7 @@ public class OrganizationService {
                 .branch(branch)
                 .parent(parent)
                 .active(request.getActive() != null ? request.getActive() : true)
+                .companyCode(activeTenant)
                 .build();
         return toDepartmentDto(departmentRepository.save(dept));
     }
@@ -104,6 +140,10 @@ public class OrganizationService {
     public DepartmentDto updateDepartment(Long id, CreateDepartmentRequest request) {
         Department dept = departmentRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Department", "id", id));
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if (!"all".equalsIgnoreCase(activeTenant) && !activeTenant.equalsIgnoreCase(dept.getCompanyCode())) {
+            throw new ResourceNotFoundException("Department", "id", id);
+        }
 
         dept.setName(request.getName().trim());
         if (request.getBranchId() != null) {
@@ -119,18 +159,34 @@ public class OrganizationService {
 
     @Transactional
     public void deleteDepartment(Long id) {
-        departmentRepository.deleteById(id);
+        Department dept = departmentRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Department", "id", id));
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if (!"all".equalsIgnoreCase(activeTenant) && !activeTenant.equalsIgnoreCase(dept.getCompanyCode())) {
+            throw new ResourceNotFoundException("Department", "id", id);
+        }
+        departmentRepository.delete(dept);
     }
 
     // Positions
     @Transactional(readOnly = true)
     public List<PositionDto> getAllPositions() {
-        return positionRepository.findAll().stream().map(this::toPositionDto).collect(Collectors.toList());
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        List<Position> list = "all".equalsIgnoreCase(activeTenant)
+                ? positionRepository.findAll()
+                : positionRepository.findByCompanyCode(activeTenant.trim().toLowerCase());
+        if (list.isEmpty() && !"default".equalsIgnoreCase(activeTenant)) {
+            list = positionRepository.findByCompanyCode("default");
+        }
+        return list.stream().map(this::toPositionDto).collect(Collectors.toList());
     }
 
     @Transactional
     public PositionDto createPosition(CreatePositionRequest request) {
-        if (positionRepository.existsByCode(request.getCode())) {
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if ("all".equalsIgnoreCase(activeTenant)) activeTenant = "default";
+
+        if (positionRepository.existsByCompanyCodeAndCode(activeTenant, request.getCode().trim().toUpperCase())) {
             throw new AppException(ErrorCode.DUPLICATE_RESOURCE, "Position code already exists: " + request.getCode());
         }
         Position pos = Position.builder()
@@ -138,6 +194,7 @@ public class OrganizationService {
                 .title(request.getTitle().trim())
                 .description(request.getDescription())
                 .active(request.getActive() != null ? request.getActive() : true)
+                .companyCode(activeTenant)
                 .build();
         return toPositionDto(positionRepository.save(pos));
     }
@@ -146,6 +203,10 @@ public class OrganizationService {
     public PositionDto updatePosition(Long id, CreatePositionRequest request) {
         Position pos = positionRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Position", "id", id));
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if (!"all".equalsIgnoreCase(activeTenant) && !activeTenant.equalsIgnoreCase(pos.getCompanyCode())) {
+            throw new ResourceNotFoundException("Position", "id", id);
+        }
         pos.setTitle(request.getTitle().trim());
         pos.setDescription(request.getDescription());
         if (request.getActive() != null) pos.setActive(request.getActive());
@@ -154,7 +215,13 @@ public class OrganizationService {
 
     @Transactional
     public void deletePosition(Long id) {
-        positionRepository.deleteById(id);
+        Position pos = positionRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Position", "id", id));
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if (!"all".equalsIgnoreCase(activeTenant) && !activeTenant.equalsIgnoreCase(pos.getCompanyCode())) {
+            throw new ResourceNotFoundException("Position", "id", id);
+        }
+        positionRepository.delete(pos);
     }
 
     // Mappers

@@ -75,5 +75,9 @@ public class AttendanceDevice extends BaseEntity {
     @Builder.Default
     @Column(name = "is_active", nullable = false)
     private boolean active = true;
+
+    @Builder.Default
+    @Column(name = "company_code", nullable = false, length = 50)
+    private String companyCode = "default";
 }
 

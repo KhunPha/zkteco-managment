@@ -229,26 +229,66 @@ def persist_raw_punch_direct(device_id, sn, user_id, timestamp, status, punch):
 
         conn = get_db_connection()
         real_dev_id = device_id
+        resolved_company = None
         with conn.cursor() as cur:
-            cur.execute("SELECT id FROM attendance_devices WHERE id = %s;", (real_dev_id,))
-            if not cur.fetchone():
-                cur.execute("SELECT id FROM attendance_devices WHERE serial_number = %s OR ip_address = %s LIMIT 1;", (sn, sn))
-                row = cur.fetchone()
-                if row:
-                    real_dev_id = row[0]
+            # 1. Resolve device ID and device company_code first
+            cur.execute("SELECT id, company_code FROM attendance_devices WHERE id = %s;", (real_dev_id,))
+            d_row = cur.fetchone()
+            if not d_row:
+                cur.execute("SELECT id, company_code FROM attendance_devices WHERE serial_number = %s OR ip_address = %s LIMIT 1;", (sn, sn))
+                d_row = cur.fetchone()
+            if not d_row:
+                cur.execute("SELECT id, company_code FROM attendance_devices WHERE is_active = true ORDER BY id ASC LIMIT 1;")
+                d_row = cur.fetchone()
+
+            dev_company = None
+            if d_row:
+                real_dev_id = d_row[0]
+                if d_row[1] and d_row[1] != 'default':
+                    dev_company = d_row[1]
+
+            # 2. Resolve company_code from personnel PIN (matching device company if known)
+            if dev_company:
+                cur.execute("""
+                    SELECT company_code FROM employees WHERE employee_code = %s AND company_code = %s AND deleted_at IS NULL
+                    UNION
+                    SELECT company_code FROM students WHERE student_code = %s AND company_code = %s AND deleted_at IS NULL
+                    UNION
+                    SELECT company_code FROM attendance_device_users WHERE device_pin = %s AND company_code = %s
+                    LIMIT 1;
+                """, (str(user_id), dev_company, str(user_id), dev_company, str(user_id), dev_company))
+                comp_row = cur.fetchone()
+                if comp_row and comp_row[0]:
+                    resolved_company = comp_row[0]
                 else:
-                    cur.execute("SELECT id FROM attendance_devices WHERE is_active = true ORDER BY id ASC LIMIT 1;")
-                    r2 = cur.fetchone()
-                    real_dev_id = r2[0] if r2 else 3
+                    resolved_company = dev_company
+
+            if not resolved_company:
+                cur.execute("""
+                    SELECT company_code FROM employees WHERE employee_code = %s AND deleted_at IS NULL
+                    UNION
+                    SELECT company_code FROM students WHERE student_code = %s AND deleted_at IS NULL
+                    UNION
+                    SELECT company_code FROM attendance_device_users WHERE device_pin = %s
+                    LIMIT 1;
+                """, (str(user_id), str(user_id), str(user_id)))
+                comp_row = cur.fetchone()
+                if comp_row and comp_row[0]:
+                    resolved_company = comp_row[0]
+
+            if not resolved_company:
+                resolved_company = dev_company if dev_company else "default"
 
             cur.execute("""
                 INSERT INTO attendance_raw_logs (
                     device_id, device_sn, device_pin, punch_time, punch_state, verify_type,
-                    original_payload, processed, idempotency_key, created_at
+                    original_payload, processed, idempotency_key, company_code, created_at
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, false, %s, NOW()
-                ) ON CONFLICT (idempotency_key) DO NOTHING;
-            """, (real_dev_id, sn, str(user_id), punch_time_utc, punch_state, verify_type, line_payload, idempotency_key))
+                    %s, %s, %s, %s, %s, %s, %s, false, %s, %s, NOW()
+                ) ON CONFLICT (idempotency_key) DO UPDATE
+                SET company_code = EXCLUDED.company_code
+                WHERE attendance_raw_logs.company_code = 'default' AND EXCLUDED.company_code <> 'default';
+            """, (real_dev_id, sn, str(user_id), punch_time_utc, punch_state, verify_type, line_payload, idempotency_key, resolved_company))
             inserted = cur.rowcount > 0
 
         if inserted:
@@ -307,13 +347,13 @@ def sync_pending_logs(conn, dev_id, sn, max_hours=48):
 
 def reconcile_poller(devices):
     """
-    Background worker that runs every 8 seconds. Connects independently to both terminals,
-    fetches recent punches, and synchronizes any punch that may have been missed by live capture
-    (e.g. while an admin was enrolling a fingerprint).
+    Background recovery worker that runs every 5 minutes (300s). Connects to terminals
+    to reconcile any punches that may have been missed during network interruptions or offline mode,
+    without bogging down the terminal CPU during live recognition.
     """
-    logger.info("Continuous reconciliation worker started (60-second recovery interval)")
+    logger.info("Continuous reconciliation worker started (5-minute recovery interval)")
     while True:
-        time.sleep(60)
+        time.sleep(300)
         for dev in devices:
             dev_id = dev["id"]
             ip = dev["ip"]

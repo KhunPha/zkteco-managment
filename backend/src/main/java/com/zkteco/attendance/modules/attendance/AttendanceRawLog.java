@@ -57,6 +57,10 @@ public class AttendanceRawLog {
     private String idempotencyKey;
 
     @Builder.Default
+    @Column(name = "company_code", length = 50)
+    private String companyCode = "default";
+
+    @Builder.Default
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt = Instant.now();
 }

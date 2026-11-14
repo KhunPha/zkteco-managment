@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useMemo } from "react";
+import { useRouter } from "next/navigation";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Volume2,
@@ -27,8 +28,11 @@ import {
   VideoOff,
   RefreshCw,
   AlertCircle,
+  PowerOff,
+  LogOut,
+  LayoutDashboard,
 } from "lucide-react";
-import api from "@/lib/api";
+import api, { getApiBaseUrl } from "@/lib/api";
 import { formatTime } from "@/lib/utils";
 import Portal from "@/components/common/Portal";
 import KioskAudioSettingsModal from "@/components/kiosk/KioskAudioSettingsModal";
@@ -48,7 +52,15 @@ import {
 } from "@/lib/faceEngine";
 
 export default function AttendanceLiveKioskPage() {
+  const router = useRouter();
   const queryClient = useQueryClient();
+  const [isKioskActive, setIsKioskActive] = useState(() => {
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("kiosk_active_status");
+      return saved !== null ? saved === "true" : true;
+    }
+    return true;
+  });
   const [audioModalOpen, setAudioModalOpen] = useState(false);
   const [selectedSoundId, setSelectedSoundId] = useState("khmer_thank_you");
   const [audioAutoPlay, setAudioAutoPlay] = useState(true);
@@ -59,7 +71,8 @@ export default function AttendanceLiveKioskPage() {
   const [currentDateStr, setCurrentDateStr] = useState("");
   const [lastLogId, setLastLogId] = useState(null);
   const [activeScan, setActiveScan] = useState(null);
-  const [countdown, setCountdown] = useState(2);
+  const SCAN_DISPLAY_DURATION = 8;
+  const [countdown, setCountdown] = useState(SCAN_DISPLAY_DURATION);
 
   const audioRef = useRef(null);
   const lastAudioPlayedRef = useRef(0);
@@ -218,17 +231,68 @@ export default function AttendanceLiveKioskPage() {
     ];
   }, [devicesList]);
 
-  // Poll real-time biometric raw punch events with instant 100ms interval
+  // Poll real-time biometric raw punch events with healthy fallback interval
   const { data: liveScans } = useQuery({
     queryKey: ["live-scans-stream"],
     queryFn: async () => {
       const res = await api.get("/api/v1/attendance/live-scans?limit=15");
-      return res.data?.data || [];
+      const serverLogs = res.data?.data || [];
+      const currentCache = queryClient.getQueryData(["live-scans-stream"]) || [];
+      const now = Date.now();
+      const recentSseLogs = currentCache.filter((item) => {
+        if (!item?.punchTime) return false;
+        const ageMs = now - new Date(item.punchTime).getTime();
+        return ageMs >= 0 && ageMs < 15000 && !serverLogs.some((s) => s.logId === item.logId);
+      });
+      return [...recentSseLogs, ...serverLogs].slice(0, 15);
     },
-    refetchInterval: 100,
-    staleTime: 0,
-    refetchIntervalInBackground: true,
+    refetchInterval: isKioskActive ? 10000 : false,
+    staleTime: 5000,
+    refetchIntervalInBackground: false,
+    enabled: isKioskActive,
   });
+
+  // Direct SSE push stream for instant hardware punch reaction (< 10ms)
+  useEffect(() => {
+    if (!isKioskActive) return;
+    let es;
+    try {
+      const activeCompany = typeof window !== "undefined" ? (localStorage.getItem("active_company_code") || "default") : "default";
+      const sseUrl = `${getApiBaseUrl()}/api/v1/attendance/stream?companyCode=${encodeURIComponent(activeCompany)}`;
+      es = new EventSource(sseUrl);
+      es.addEventListener("punch", (e) => {
+        try {
+          const newPunch = JSON.parse(e.data);
+          if (newPunch && newPunch.logId) {
+            // STRICT TENANT ISOLATION: Show data only in this company, not other companies
+            const currentActive = typeof window !== "undefined" ? (localStorage.getItem("active_company_code") || "default") : "default";
+            if (currentActive !== "all" && newPunch.companyCode && newPunch.companyCode !== currentActive) {
+              return;
+            }
+            setLastLogId(newPunch.logId);
+            triggerActiveScanWithCountdown(newPunch);
+            if (audioAutoPlay) {
+              const now = Date.now();
+              if (now - lastAudioPlayedRef.current > 2000) {
+                lastAudioPlayedRef.current = now;
+                kioskAudioEngine.play("khmer_thank_you", volume);
+              }
+            }
+            queryClient.setQueryData(["live-scans-stream"], (old = []) => {
+              const exists = old.some((item) => item.logId === newPunch.logId);
+              if (exists) return old;
+              return [newPunch, ...old.slice(0, 14)];
+            });
+          }
+        } catch (err) {
+          console.error("SSE live kiosk error:", err);
+        }
+      });
+    } catch {}
+    return () => {
+      if (es) es.close();
+    };
+  }, [isKioskActive, audioAutoPlay, volume, queryClient]);
 
   // Handle auto-cleanup and 2-second countdown timer
   const triggerActiveScanWithCountdown = (record) => {
@@ -252,12 +316,12 @@ export default function AttendanceLiveKioskPage() {
       departmentOrClass: record.departmentOrClass || record.departmentName || match?.departmentOrClass,
       profileImageUrl: displayPhoto,
     });
-    setCountdown(2);
+    setCountdown(SCAN_DISPLAY_DURATION);
 
     if (dismissTimerRef.current) clearTimeout(dismissTimerRef.current);
     if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
 
-    let secLeft = 2;
+    let secLeft = SCAN_DISPLAY_DURATION;
     countdownIntervalRef.current = setInterval(() => {
       secLeft -= 1;
       setCountdown((prev) => Math.max(0, prev - 1));
@@ -268,8 +332,8 @@ export default function AttendanceLiveKioskPage() {
 
     dismissTimerRef.current = setTimeout(() => {
       setActiveScan(null);
-      setCountdown(2);
-    }, 2000);
+      setCountdown(SCAN_DISPLAY_DURATION);
+    }, SCAN_DISPLAY_DURATION * 1000);
   };
 
   // Cleanup timers on unmount
@@ -658,7 +722,7 @@ export default function AttendanceLiveKioskPage() {
   };
 
   useEffect(() => {
-    if (webcamEnabled) {
+    if (isKioskActive && webcamEnabled) {
       startWebcamFaceId();
     } else {
       stopWebcamFaceId();
@@ -666,7 +730,7 @@ export default function AttendanceLiveKioskPage() {
     return () => {
       stopWebcamFaceId();
     };
-  }, [webcamEnabled]);
+  }, [isKioskActive, webcamEnabled]);
 
   // Trigger audio and display on new punch event
   useEffect(() => {
@@ -679,7 +743,7 @@ export default function AttendanceLiveKioskPage() {
       setLastLogId(latest.logId);
       if (latest.punchTime) {
         const punchAgeMs = Date.now() - new Date(latest.punchTime).getTime();
-        if (punchAgeMs >= 0 && punchAgeMs <= 2000) {
+        if (punchAgeMs >= 0 && punchAgeMs <= 30000) {
           triggerActiveScanWithCountdown(latest);
         }
       }
@@ -747,7 +811,39 @@ export default function AttendanceLiveKioskPage() {
     if (dismissTimerRef.current) clearTimeout(dismissTimerRef.current);
     if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
     setActiveScan(null);
-    setCountdown(2);
+    setCountdown(SCAN_DISPLAY_DURATION);
+  };
+
+  const handleTurnOffKiosk = async () => {
+    stopWebcamFaceId();
+    if (document.fullscreenElement) {
+      try {
+        if (document.exitFullscreen) await document.exitFullscreen();
+      } catch (_) {}
+    }
+    setIsFullscreen(false);
+    setIsKioskActive(false);
+    if (typeof window !== "undefined") {
+      localStorage.setItem("kiosk_active_status", "false");
+    }
+  };
+
+  const handleTurnOnKiosk = () => {
+    setIsKioskActive(true);
+    if (typeof window !== "undefined") {
+      localStorage.setItem("kiosk_active_status", "true");
+    }
+  };
+
+  const handleExitToDashboard = async () => {
+    stopWebcamFaceId();
+    if (document.fullscreenElement) {
+      try {
+        if (document.exitFullscreen) await document.exitFullscreen();
+      } catch (_) {}
+    }
+    setIsFullscreen(false);
+    router.push("/dashboard");
   };
 
   const kioskContent = (
@@ -758,6 +854,28 @@ export default function AttendanceLiveKioskPage() {
           : "space-y-6"
       }
     >
+      {/* Floating Kiosk Quick Controls in Fullscreen */}
+      {isFullscreen && (
+        <div className="fixed top-3.5 right-4 z-[9999999] flex items-center gap-2 animate-in fade-in duration-150">
+          <button
+            onClick={handleTurnOffKiosk}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-600/95 hover:bg-rose-500 text-white font-bold text-xs shadow-lg shadow-rose-600/40 border border-rose-400/50 backdrop-blur-md transition-all cursor-pointer active:scale-95"
+            title="បិទ Live Kiosk (Turn Off Kiosk & Stop Camera)"
+          >
+            <PowerOff size={13} />
+            <span>បិទ Kiosk (Turn Off)</span>
+          </button>
+          <button
+            onClick={handleExitToDashboard}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-slate-200 font-bold text-xs shadow-lg border border-slate-700 backdrop-blur-md transition-all cursor-pointer active:scale-95"
+            title="ចាកចេញទៅ Dashboard (Exit to Dashboard)"
+          >
+            <LogOut size={13} />
+            <span>ចាកចេញ (Exit)</span>
+          </button>
+        </div>
+      )}
+
       {/* Kiosk Top Bar */}
       <div
         className={`flex flex-col sm:flex-row sm:items-center justify-between gap-4 rounded-3xl bg-linear-to-r from-slate-900 via-indigo-950 to-slate-900 text-white shadow-xl border border-indigo-900/40 ${
@@ -866,6 +984,26 @@ export default function AttendanceLiveKioskPage() {
               title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen Gate Display"}
             >
               {isFullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
+            </button>
+
+            {/* Turn Off Kiosk / Standby Button */}
+            <button
+              onClick={handleTurnOffKiosk}
+              className="flex items-center gap-1.5 px-3 py-1.5 sm:py-2 rounded-2xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 text-xs font-bold transition-all cursor-pointer shadow-xs active:scale-95"
+              title="បិទដំណើរការ Live Kiosk (Turn Off Kiosk & Stop Camera/Audio)"
+            >
+              <PowerOff size={15} className="text-rose-400 shrink-0" />
+              <span className="hidden sm:inline">បិទ Kiosk</span>
+            </button>
+
+            {/* Exit to Dashboard Button */}
+            <button
+              onClick={handleExitToDashboard}
+              className="flex items-center gap-1.5 px-3 py-1.5 sm:py-2 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-semibold transition-all cursor-pointer shadow-xs active:scale-95"
+              title="ចាកចេញទៅផ្ទាំងគ្រប់គ្រង (Exit to Main Dashboard)"
+            >
+              <LogOut size={15} className="text-slate-400 shrink-0" />
+              <span className="hidden md:inline">ទៅ Dashboard</span>
             </button>
           </div>
         </div>
@@ -1197,7 +1335,7 @@ export default function AttendanceLiveKioskPage() {
                   <div className="w-full bg-slate-100 dark:bg-slate-800 rounded-full h-1.5 overflow-hidden shrink-0">
                     <div
                       className="bg-gradient-to-r from-emerald-500 to-indigo-600 h-1.5 rounded-full transition-all duration-1000 ease-linear"
-                      style={{ width: `${(countdown / 2) * 100}%` }}
+                      style={{ width: `${(countdown / SCAN_DISPLAY_DURATION) * 100}%` }}
                     />
                   </div>
 
@@ -1388,7 +1526,7 @@ export default function AttendanceLiveKioskPage() {
                       Ready to Scan • Present RFID Card or Biometric Fingerprint
                     </p>
                     <p className="text-xs text-slate-400 dark:text-slate-500">
-                      Dual Gate Terminals ({activeDevices.map((d) => `${d.ipAddress || d.ip_address || "203.147.129.237"}:${d.port || 4370}`).join(" & ")}) are armed and listening in real-time. Results will flash here for 2s.
+                      Dual Gate Terminals ({activeDevices.map((d) => `${d.ipAddress || d.ip_address || "203.147.129.237"}:${d.port || 4370}`).join(" & ")}) are armed and listening in real-time. Results will display here for {SCAN_DISPLAY_DURATION}s.
                     </p>
                   </div>
 
@@ -1449,6 +1587,81 @@ export default function AttendanceLiveKioskPage() {
       />
     </div>
   );
+
+  if (!isKioskActive) {
+    return (
+      <div className="min-h-[70vh] flex flex-col items-center justify-center p-4 sm:p-6 text-center select-none animate-in fade-in zoom-in-95 duration-200">
+        <div className="max-w-xl w-full p-6 sm:p-8 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl space-y-6">
+          <div className="relative mx-auto w-20 h-20 rounded-3xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 flex items-center justify-center text-rose-500 shadow-inner">
+            <PowerOff size={36} />
+            <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-rose-500 border-2 border-white dark:border-slate-900" />
+          </div>
+
+          <div className="space-y-2">
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/20">
+              <span className="w-2 h-2 rounded-full bg-rose-500" />
+              LIVE KIOSK STANDBY • បានបិទសម្រាក
+            </span>
+            <h2 className="text-xl sm:text-2xl font-black text-slate-800 dark:text-white">
+              Live Attendance Kiosk ត្រូវបានបិទដំណើរការ
+            </h2>
+            <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 leading-relaxed">
+              កាមេរ៉ាស្កេនមុខ (Webcam Face ID) និងសំឡេងស្កេនត្រូវបានបិទសម្រាក ដើម្បីឱ្យអ្នកប្រើប្រាស់ផ្សេងទៀតអាចប្រើប្រាស់កុំព្យូទ័រនេះ និងមុខងារផ្សេងៗនៃប្រព័ន្ធបានដោយសេរី។
+            </p>
+          </div>
+
+          <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-100 dark:border-slate-800/60 text-xs text-slate-600 dark:text-slate-300 flex items-center justify-between font-mono">
+            <span>Terminal Hardware Status:</span>
+            <span className="font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+              ZKTeco Dual Terminals Online (203.147.129.237)
+            </span>
+          </div>
+
+          <div className="flex flex-col sm:flex-row items-center gap-3 pt-2">
+            <button
+              onClick={handleTurnOnKiosk}
+              className="w-full sm:flex-1 py-3 px-5 rounded-2xl bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-xs shadow-lg shadow-emerald-600/30 flex items-center justify-center gap-2 transition-all cursor-pointer active:scale-95"
+            >
+              <Radio size={16} className="animate-pulse" />
+              <span>⚡ បើកដំណើរការ Kiosk ឡើងវិញ (Turn On Kiosk)</span>
+            </button>
+
+            <button
+              onClick={() => router.push("/dashboard")}
+              className="w-full sm:w-auto py-3 px-5 rounded-2xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold text-xs border border-slate-200 dark:border-slate-700 flex items-center justify-center gap-2 transition-all cursor-pointer active:scale-95"
+            >
+              <LayoutDashboard size={15} />
+              <span>ទៅ Dashboard</span>
+            </button>
+          </div>
+
+          <div className="pt-2 flex items-center justify-center gap-3 sm:gap-4 text-xs font-semibold text-slate-400 flex-wrap">
+            <button
+              onClick={() => router.push("/device-users")}
+              className="hover:text-emerald-500 transition-colors cursor-pointer"
+            >
+              👥 បុគ្គលិក / Device Users
+            </button>
+            <span>•</span>
+            <button
+              onClick={() => router.push("/reports")}
+              className="hover:text-emerald-500 transition-colors cursor-pointer"
+            >
+              📊 របាយការណ៍វត្តមាន
+            </button>
+            <span>•</span>
+            <button
+              onClick={() => router.push("/devices")}
+              className="hover:text-emerald-500 transition-colors cursor-pointer"
+            >
+              📟 ម៉ាស៊ីនស្កេន
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (isFullscreen) {
     return <Portal>{kioskContent}</Portal>;

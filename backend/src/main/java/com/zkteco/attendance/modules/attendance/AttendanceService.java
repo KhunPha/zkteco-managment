@@ -4,6 +4,9 @@ import com.zkteco.attendance.common.AppException;
 import com.zkteco.attendance.common.ErrorCode;
 import com.zkteco.attendance.common.PageResponse;
 import com.zkteco.attendance.common.ResourceNotFoundException;
+import com.zkteco.attendance.common.TimeUtils;
+import java.time.Duration;
+import java.time.LocalTime;
 import com.zkteco.attendance.modules.attendance.dto.AttendanceRecordDto;
 import com.zkteco.attendance.modules.attendance.dto.LiveScanEventDto;
 import com.zkteco.attendance.modules.attendance.dto.ManualAttendanceRequest;
@@ -31,9 +34,12 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
@@ -51,6 +57,83 @@ public class AttendanceService {
     private final DeviceUserRepository deviceUserRepository;
     private final FaceBiometricRepository faceBiometricRepository;
 
+    public static class TenantSseSubscription {
+        final org.springframework.web.servlet.mvc.method.annotation.SseEmitter emitter;
+        final String companyCode;
+
+        public TenantSseSubscription(org.springframework.web.servlet.mvc.method.annotation.SseEmitter emitter, String companyCode) {
+            this.emitter = emitter;
+            this.companyCode = companyCode;
+        }
+    }
+
+    private final List<TenantSseSubscription> sseSubscriptions = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private final Map<String, LiveScanEventDto> personnelCache = new java.util.concurrent.ConcurrentHashMap<>();
+
+    @org.springframework.context.event.EventListener
+    public void onRawPunch(com.zkteco.attendance.modules.attendance.event.RawPunchEvent event) {
+        broadcastLiveScan(event.getRawLog());
+    }
+
+    public org.springframework.web.servlet.mvc.method.annotation.SseEmitter subscribeToLiveScans() {
+        return subscribeToLiveScans(null);
+    }
+
+    public org.springframework.web.servlet.mvc.method.annotation.SseEmitter subscribeToLiveScans(String explicitCompanyCode) {
+        String activeTenant = (explicitCompanyCode != null && !explicitCompanyCode.isBlank())
+                ? explicitCompanyCode.trim()
+                : com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+
+        org.springframework.web.servlet.mvc.method.annotation.SseEmitter emitter = new org.springframework.web.servlet.mvc.method.annotation.SseEmitter(300_000L);
+        TenantSseSubscription sub = new TenantSseSubscription(emitter, activeTenant);
+        sseSubscriptions.add(sub);
+        emitter.onCompletion(() -> sseSubscriptions.remove(sub));
+        emitter.onTimeout(() -> sseSubscriptions.remove(sub));
+        emitter.onError((e) -> sseSubscriptions.remove(sub));
+
+        try {
+            Pageable pageable = PageRequest.of(0, 1);
+            Page<AttendanceRawLog> latest;
+            if (activeTenant == null || "all".equalsIgnoreCase(activeTenant)) {
+                latest = rawLogRepository.findAllByOrderByPunchTimeDesc(pageable);
+            } else {
+                latest = rawLogRepository.findByCompanyCodeOrderByPunchTimeDesc(activeTenant, pageable);
+            }
+            if (!latest.isEmpty()) {
+                LiveScanEventDto dto = toLiveScanEventDto(latest.getContent().get(0));
+                emitter.send(org.springframework.web.servlet.mvc.method.annotation.SseEmitter.event().name("init").data(dto));
+            }
+        } catch (Exception ignored) {}
+
+        return emitter;
+    }
+
+    public void broadcastLiveScan(AttendanceRawLog rawLog) {
+        if (rawLog == null || sseSubscriptions.isEmpty()) return;
+        try {
+            LiveScanEventDto dto = toLiveScanEventDto(rawLog);
+            String logCompany = rawLog.getCompanyCode() != null ? rawLog.getCompanyCode() : dto.getCompanyCode();
+            if (logCompany == null) logCompany = "default";
+
+            List<TenantSseSubscription> deadSubs = new ArrayList<>();
+            for (TenantSseSubscription sub : sseSubscriptions) {
+                try {
+                    // Strictly isolate: Deliver ONLY if subscription is for "all" or matches punch company
+                    if (sub.companyCode == null || "all".equalsIgnoreCase(sub.companyCode) || sub.companyCode.equalsIgnoreCase(logCompany)) {
+                        sub.emitter.send(org.springframework.web.servlet.mvc.method.annotation.SseEmitter.event()
+                                .name("punch")
+                                .data(dto));
+                    }
+                } catch (Exception e) {
+                    deadSubs.add(sub);
+                }
+            }
+            sseSubscriptions.removeAll(deadSubs);
+        } catch (Exception ex) {
+            log.warn("Failed to broadcast live scan via SSE: {}", ex.getMessage());
+        }
+    }
+
     @Transactional(readOnly = true)
     public PageResponse<AttendanceRecordDto> getAttendanceRecords(
             LocalDate date,
@@ -67,6 +150,11 @@ public class AttendanceService {
 
         Specification<AttendanceRecord> spec = (root, query, cb) -> {
             List<Predicate> predicates = new ArrayList<>();
+
+            String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+            if (activeTenant != null && !activeTenant.isBlank() && !"all".equalsIgnoreCase(activeTenant)) {
+                predicates.add(cb.equal(root.get("companyCode"), activeTenant.trim().toLowerCase()));
+            }
 
             if (date != null) {
                 predicates.add(cb.equal(root.get("attendanceDate"), date));
@@ -86,7 +174,10 @@ public class AttendanceService {
             }
 
             if (branchId != null) {
-                predicates.add(cb.equal(empJoin.get("branch").get("id"), branchId));
+                predicates.add(cb.or(
+                        cb.equal(empJoin.get("branch").get("id"), branchId),
+                        cb.equal(stJoin.get("branch").get("id"), branchId)
+                ));
             }
 
             if (status != null && !status.trim().isEmpty()) {
@@ -101,6 +192,8 @@ public class AttendanceService {
                 } else if ("TEACHER".equals(pType)) {
                     predicates.add(cb.isNotNull(root.get("employee")));
                     predicates.add(cb.or(
+                            cb.isTrue(empJoin.get("isTeacher")),
+                            cb.equal(cb.upper(empJoin.get("staffType")), "TEACHER"),
                             cb.equal(empJoin.get("department").get("id"), 4L),
                             cb.like(cb.lower(empJoin.get("department").get("name")), "%academic%"),
                             cb.like(cb.lower(empJoin.get("position").get("title")), "%teacher%"),
@@ -109,6 +202,8 @@ public class AttendanceService {
                 } else if ("EMPLOYEE".equals(pType) || "STAFF".equals(pType)) {
                     predicates.add(cb.isNotNull(root.get("employee")));
                     predicates.add(cb.and(
+                            cb.or(cb.isNull(empJoin.get("isTeacher")), cb.isFalse(empJoin.get("isTeacher"))),
+                            cb.or(cb.isNull(empJoin.get("staffType")), cb.notEqual(cb.upper(empJoin.get("staffType")), "TEACHER")),
                             cb.or(
                                     cb.isNull(empJoin.get("department")),
                                     cb.notEqual(empJoin.get("department").get("id"), 4L)
@@ -188,14 +283,123 @@ public class AttendanceService {
 
     @Transactional(readOnly = true)
     public List<LiveScanEventDto> getLiveScans(int limit) {
-        Pageable pageable = PageRequest.of(0, Math.min(Math.max(limit, 1), 50));
-        Page<AttendanceRawLog> rawLogs = rawLogRepository.findAllByOrderByPunchTimeDesc(pageable);
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        Pageable pageable = PageRequest.of(0, Math.min(Math.max(limit, 1), 100));
+        Page<AttendanceRawLog> rawLogs;
+        if (activeTenant == null || "all".equalsIgnoreCase(activeTenant)) {
+            rawLogs = rawLogRepository.findAllByOrderByPunchTimeDesc(pageable);
+        } else {
+            rawLogs = rawLogRepository.findByCompanyCodeOrderByPunchTimeDesc(activeTenant, pageable);
+        }
 
         return rawLogs.getContent().stream().map(this::toLiveScanEventDto).collect(Collectors.toList());
     }
 
+    @Transactional(readOnly = true)
+    public PageResponse<LiveScanEventDto> getPunches(
+            String search,
+            String verifyType,
+            String punchState,
+            Long deviceId,
+            LocalDate date,
+            Pageable pageable) {
+
+        Specification<AttendanceRawLog> spec = (root, query, cb) -> {
+            List<Predicate> predicates = new ArrayList<>();
+
+            String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+            if (activeTenant != null && !activeTenant.isBlank() && !"all".equalsIgnoreCase(activeTenant)) {
+                predicates.add(cb.equal(root.get("companyCode"), activeTenant.trim().toLowerCase()));
+            }
+
+            if (verifyType != null && !verifyType.isBlank() && !"ALL".equalsIgnoreCase(verifyType)) {
+                predicates.add(cb.equal(cb.upper(root.get("verifyType")), verifyType.trim().toUpperCase()));
+            }
+
+            if (punchState != null && !punchState.isBlank() && !"ALL".equalsIgnoreCase(punchState)) {
+                predicates.add(cb.equal(cb.upper(root.get("punchState")), punchState.trim().toUpperCase()));
+            }
+
+            if (deviceId != null) {
+                predicates.add(cb.equal(root.get("device").get("id"), deviceId));
+            }
+
+            if (date != null) {
+                Instant startOfDay = date.atStartOfDay(ZoneId.systemDefault()).toInstant();
+                Instant endOfDay = date.plusDays(1).atStartOfDay(ZoneId.systemDefault()).toInstant();
+                predicates.add(cb.between(root.get("punchTime"), startOfDay, endOfDay));
+            }
+
+            if (search != null && !search.isBlank()) {
+                String pattern = "%" + search.trim().toLowerCase() + "%";
+                predicates.add(cb.or(
+                        cb.like(cb.lower(root.get("devicePin")), pattern),
+                        cb.like(cb.lower(root.get("deviceSn")), pattern)
+                ));
+            }
+
+            return cb.and(predicates.toArray(new Predicate[0]));
+        };
+
+        Page<AttendanceRawLog> page = rawLogRepository.findAll(spec, pageable);
+        List<LiveScanEventDto> dtos = page.getContent().stream().map(this::toLiveScanEventDto).collect(Collectors.toList());
+
+        return PageResponse.of(page, dtos);
+    }
+
+    @Transactional(readOnly = true)
+    public Map<String, Object> getPunchStats() {
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        LocalDate today = LocalDate.now();
+        Instant startOfDay = today.atStartOfDay(ZoneId.systemDefault()).toInstant();
+        Instant endOfDay = today.plusDays(1).atStartOfDay(ZoneId.systemDefault()).toInstant();
+
+        long todayTotal;
+        if (activeTenant == null || "all".equalsIgnoreCase(activeTenant)) {
+            todayTotal = rawLogRepository.countByPunchTimeBetween(startOfDay, endOfDay);
+        } else {
+            todayTotal = rawLogRepository.countByCompanyCodeAndPunchTimeBetween(activeTenant, startOfDay, endOfDay);
+        }
+
+        Map<String, Object> stats = new HashMap<>();
+        stats.put("todayTotal", todayTotal);
+        return stats;
+    }
+
     private LiveScanEventDto toLiveScanEventDto(AttendanceRawLog log) {
         String pin = log.getDevicePin();
+        String logCompany = (log.getCompanyCode() != null && !log.getCompanyCode().isBlank()) 
+                ? log.getCompanyCode().trim().toLowerCase() : "default";
+        String cacheKey = logCompany + "_" + pin;
+
+        // Ultra-fast in-memory cache lookup for personnel profile (0ms response)
+        LiveScanEventDto cached = (pin != null) ? personnelCache.get(cacheKey) : null;
+        if (cached != null) {
+            return LiveScanEventDto.builder()
+                    .logId(log.getId())
+                    .deviceId(log.getDevice() != null ? log.getDevice().getId() : null)
+                    .deviceName(log.getDevice() != null ? log.getDevice().getName() : "Terminal (SN: " + log.getDeviceSn() + ")")
+                    .deviceSn(log.getDeviceSn())
+                    .devicePin(pin)
+                    .personnelName(cached.getPersonnelName())
+                    .personnelKhmerName(cached.getPersonnelKhmerName())
+                    .personnelCode(cached.getPersonnelCode())
+                    .personnelType(cached.getPersonnelType())
+                    .departmentOrClass(cached.getDepartmentOrClass())
+                    .positionOrGrade(cached.getPositionOrGrade())
+                    .branchOrYear(cached.getBranchOrYear())
+                    .gender(cached.getGender())
+                    .contactInfo(cached.getContactInfo())
+                    .cardNumber(cached.getCardNumber())
+                    .profileImageUrl(cached.getProfileImageUrl())
+                    .punchTime(log.getPunchTime())
+                    .verifyType(log.getVerifyType() != null ? log.getVerifyType() : "OTHER")
+                    .punchState(log.getPunchState() != null ? log.getPunchState() : "CHECK_IN")
+                    .statusMessage("VERIFIED_SUCCESS")
+                    .companyCode(cached.getCompanyCode() != null ? cached.getCompanyCode() : log.getCompanyCode())
+                    .build();
+        }
+
         String name = "Card / User (" + pin + ")";
         String khmerName = null;
         String code = pin;
@@ -254,9 +458,14 @@ public class AttendanceService {
             }
         }
 
-        // 2. Direct student lookup if still unresolved
+        // 2. Direct student lookup if still unresolved (company-scoped first)
         if (("Card / User (" + pin + ")").equals(name) && pin != null) {
-            Optional<Student> stOpt = studentRepository.findByStudentCodeAndDeletedAtIsNull(pin);
+            Optional<Student> stOpt = (logCompany != null && !logCompany.isBlank() && !"default".equalsIgnoreCase(logCompany))
+                    ? studentRepository.findByCompanyCodeAndStudentCodeAndDeletedAtIsNull(logCompany, pin)
+                    : studentRepository.findByStudentCodeAndDeletedAtIsNull(pin);
+            if (stOpt.isEmpty()) {
+                stOpt = studentRepository.findByStudentCodeAndDeletedAtIsNull(pin);
+            }
             if (stOpt.isEmpty()) {
                 stOpt = studentRepository.findFirstByStudentCodeOrderByIdDesc(pin);
             }
@@ -276,9 +485,14 @@ public class AttendanceService {
             }
         }
 
-        // 3. Direct employee lookup if still unresolved
+        // 3. Direct employee lookup if still unresolved (company-scoped first)
         if (("Card / User (" + pin + ")").equals(name) && pin != null) {
-            Optional<Employee> empOpt = employeeRepository.findByEmployeeCodeAndDeletedAtIsNull(pin);
+            Optional<Employee> empOpt = (logCompany != null && !logCompany.isBlank() && !"default".equalsIgnoreCase(logCompany))
+                    ? employeeRepository.findByCompanyCodeAndEmployeeCodeAndDeletedAtIsNull(logCompany, pin)
+                    : employeeRepository.findByEmployeeCodeAndDeletedAtIsNull(pin);
+            if (empOpt.isEmpty()) {
+                empOpt = employeeRepository.findByEmployeeCodeAndDeletedAtIsNull(pin);
+            }
             if (empOpt.isEmpty()) {
                 empOpt = employeeRepository.findFirstByEmployeeCodeOrderByIdDesc(pin);
             }
@@ -331,7 +545,15 @@ public class AttendanceService {
             }
         }
 
-        return LiveScanEventDto.builder()
+        String resolvedCompanyCode = log.getCompanyCode();
+        if (devUserOpt.isPresent() && devUserOpt.get().getCompanyCode() != null) {
+            resolvedCompanyCode = devUserOpt.get().getCompanyCode();
+        }
+        if (resolvedCompanyCode == null) {
+            resolvedCompanyCode = "default";
+        }
+
+        LiveScanEventDto dto = LiveScanEventDto.builder()
                 .logId(log.getId())
                 .deviceId(log.getDevice() != null ? log.getDevice().getId() : null)
                 .deviceName(log.getDevice() != null ? log.getDevice().getName() : "Terminal (SN: " + log.getDeviceSn() + ")")
@@ -352,12 +574,25 @@ public class AttendanceService {
                 .verifyType(log.getVerifyType() != null ? log.getVerifyType() : "OTHER")
                 .punchState(log.getPunchState() != null ? log.getPunchState() : "CHECK_IN")
                 .statusMessage("VERIFIED_SUCCESS")
+                .companyCode(resolvedCompanyCode)
                 .build();
+
+        if (pin != null && !("Card / User (" + pin + ")").equals(name)) {
+            personnelCache.put(cacheKey, dto);
+        }
+
+        return dto;
     }
 
     @Transactional(readOnly = true)
     public PageResponse<com.zkteco.attendance.modules.attendance.dto.AttendanceRawLogDto> getRawLogs(Pageable pageable) {
-        Page<AttendanceRawLog> page = rawLogRepository.findAllByOrderByPunchTimeDesc(pageable);
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        Page<AttendanceRawLog> page;
+        if (activeTenant == null || "all".equalsIgnoreCase(activeTenant)) {
+            page = rawLogRepository.findAllByOrderByPunchTimeDesc(pageable);
+        } else {
+            page = rawLogRepository.findByCompanyCodeOrderByPunchTimeDesc(activeTenant, pageable);
+        }
         List<com.zkteco.attendance.modules.attendance.dto.AttendanceRawLogDto> dtos = page.getContent().stream().map(log -> {
             LiveScanEventDto resolved = toLiveScanEventDto(log);
 
@@ -421,7 +656,9 @@ public class AttendanceService {
         if (r.getStudent() != null) {
             pType = "STUDENT";
         } else if (r.getEmployee() != null) {
-            if (r.getEmployee().getDepartment() != null &&
+            if (r.getEmployee().isTeacherPerson()) {
+                pType = "TEACHER";
+            } else if (r.getEmployee().getDepartment() != null &&
                     (Long.valueOf(4L).equals(r.getEmployee().getDepartment().getId()) ||
                             (r.getEmployee().getDepartment().getName() != null && r.getEmployee().getDepartment().getName().toLowerCase().contains("academic")))) {
                 pType = "TEACHER";
@@ -450,6 +687,62 @@ public class AttendanceService {
             shift2Out = r.getLastCheckOut();
         }
 
+        Long branchId = null;
+        String branchName = null;
+        String branchCode = null;
+        if (r.getEmployee() != null && r.getEmployee().getBranch() != null) {
+            branchId = r.getEmployee().getBranch().getId();
+            branchName = r.getEmployee().getBranch().getName();
+            branchCode = r.getEmployee().getBranch().getCode();
+        } else if (r.getStudent() != null && r.getStudent().getBranch() != null) {
+            branchId = r.getStudent().getBranch().getId();
+            branchName = r.getStudent().getBranch().getName();
+            branchCode = r.getStudent().getBranch().getCode();
+        }
+
+        int s1Late = 0;
+        int s1Early = 0;
+        int s2Late = 0;
+        int s2Early = 0;
+        if (r.getShift() != null) {
+            Shift shift = r.getShift();
+            int graceLate = shift.getGraceLateMinutes();
+            int graceEarly = shift.getGraceEarlyLeaveMinutes();
+
+            // Shift 1 Late
+            if (r.getFirstCheckIn() != null && shift.getStartTime() != null) {
+                LocalTime s1InLt = TimeUtils.toPhnomPenhLocalTime(r.getFirstCheckIn());
+                if (s1InLt.isAfter(shift.getStartTime().plusMinutes(graceLate))) {
+                    s1Late = (int) Duration.between(shift.getStartTime(), s1InLt).toMinutes();
+                }
+            }
+
+            // Shift 1 Early Leave (before lunch break)
+            if (r.getShift1CheckOut() != null && shift.getBreakStart() != null) {
+                LocalTime s1OutLt = TimeUtils.toPhnomPenhLocalTime(r.getShift1CheckOut());
+                if (s1OutLt.isBefore(shift.getBreakStart().minusMinutes(graceEarly))) {
+                    s1Early = (int) Duration.between(s1OutLt, shift.getBreakStart()).toMinutes();
+                }
+            }
+
+            // Shift 2 Late (after lunch break)
+            if (r.getShift2CheckIn() != null && shift.getBreakEnd() != null) {
+                LocalTime s2InLt = TimeUtils.toPhnomPenhLocalTime(r.getShift2CheckIn());
+                if (s2InLt.isAfter(shift.getBreakEnd().plusMinutes(graceLate))) {
+                    s2Late = (int) Duration.between(shift.getBreakEnd(), s2InLt).toMinutes();
+                }
+            }
+
+            // Shift 2 Early Leave (before shift end)
+            Instant s2OutEff = shift2Out != null ? shift2Out : r.getShift2CheckOut();
+            if (s2OutEff != null && shift.getEndTime() != null) {
+                LocalTime s2OutLt = TimeUtils.toPhnomPenhLocalTime(s2OutEff);
+                if (s2OutLt.isBefore(shift.getEndTime().minusMinutes(graceEarly))) {
+                    s2Early = (int) Duration.between(s2OutLt, shift.getEndTime()).toMinutes();
+                }
+            }
+        }
+
         return AttendanceRecordDto.builder()
                 .id(r.getId())
                 .attendanceDate(r.getAttendanceDate())
@@ -458,6 +751,9 @@ public class AttendanceService {
                 .employeeName(displayName)
                 .departmentId(r.getEmployee() != null && r.getEmployee().getDepartment() != null ? r.getEmployee().getDepartment().getId() : null)
                 .departmentName(r.getEmployee() != null && r.getEmployee().getDepartment() != null ? r.getEmployee().getDepartment().getName() : (r.getStudent() != null ? r.getStudent().getClassName() : null))
+                .branchId(branchId)
+                .branchName(branchName)
+                .branchCode(branchCode)
                 .studentId(r.getStudent() != null ? r.getStudent().getId() : null)
                 .studentCode(r.getStudent() != null ? r.getStudent().getStudentCode() : null)
                 .studentName(r.getStudent() != null ? r.getStudent().getEnglishName() : null)
@@ -477,6 +773,10 @@ public class AttendanceService {
                 .totalWorkMinutes(r.getTotalWorkMinutes())
                 .lateMinutes(r.getLateMinutes())
                 .earlyLeaveMinutes(r.getEarlyLeaveMinutes())
+                .shift1LateMinutes(s1Late)
+                .shift1EarlyMinutes(s1Early)
+                .shift2LateMinutes(s2Late)
+                .shift2EarlyMinutes(s2Early)
                 .overtimeMinutes(r.getOvertimeMinutes())
                 .breakMinutes(r.getBreakMinutes())
                 .status(r.getStatus())

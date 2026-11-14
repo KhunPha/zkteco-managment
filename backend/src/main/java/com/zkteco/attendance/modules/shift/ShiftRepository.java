@@ -10,6 +10,9 @@ import java.util.Optional;
 public interface ShiftRepository extends JpaRepository<Shift, Long> {
     Optional<Shift> findByCode(String code);
     boolean existsByCode(String code);
+    boolean existsByCompanyCodeAndCode(String companyCode, String code);
     List<Shift> findAllByActiveTrue();
+    List<Shift> findByCompanyCode(String companyCode);
+    List<Shift> findByCompanyCodeAndActiveTrue(String companyCode);
 }
 

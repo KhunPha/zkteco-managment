@@ -13,6 +13,9 @@ import java.util.List;
 @Repository
 public interface LeaveRequestRepository extends JpaRepository<LeaveRequest, Long> {
     Page<LeaveRequest> findByStatusOrderByCreatedAtDesc(String status, Pageable pageable);
+    Page<LeaveRequest> findAllByOrderByCreatedAtDesc(Pageable pageable);
+    Page<LeaveRequest> findByEmployeeCompanyCodeAndStatusOrderByCreatedAtDesc(String companyCode, String status, Pageable pageable);
+    Page<LeaveRequest> findByEmployeeCompanyCodeOrderByCreatedAtDesc(String companyCode, Pageable pageable);
     List<LeaveRequest> findByEmployeeIdOrderByCreatedAtDesc(Long employeeId);
 
     @Query("SELECT r FROM LeaveRequest r WHERE r.employee.id = :empId AND r.status = 'APPROVED' AND r.startDate <= :date AND r.endDate >= :date")
@@ -20,5 +23,8 @@ public interface LeaveRequestRepository extends JpaRepository<LeaveRequest, Long
 
     @Query("SELECT COUNT(r) FROM LeaveRequest r WHERE r.status = 'APPROVED' AND r.startDate <= :date AND r.endDate >= :date")
     long countEmployeesOnLeaveToday(@Param("date") LocalDate date);
+
+    @Query("SELECT COUNT(r) FROM LeaveRequest r WHERE r.employee.companyCode = :companyCode AND r.status = 'APPROVED' AND r.startDate <= :date AND r.endDate >= :date")
+    long countCompanyEmployeesOnLeaveToday(@Param("companyCode") String companyCode, @Param("date") LocalDate date);
 }
 

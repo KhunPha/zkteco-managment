@@ -31,6 +31,10 @@ public class StudentService {
     private final PersonnelCodeGeneratorService personnelCodeGeneratorService;
     private final com.zkteco.attendance.modules.biometric.FaceBiometricRepository faceBiometricRepository;
     private final com.zkteco.attendance.modules.device.DeviceUserRepository deviceUserRepository;
+    private final com.zkteco.attendance.modules.organization.BranchRepository branchRepository;
+    private final com.zkteco.attendance.modules.audit.AuditLogService auditLogService;
+    private final com.zkteco.attendance.modules.shift.EmployeeScheduleRepository scheduleRepository;
+    private final com.zkteco.attendance.modules.shift.ShiftRepository shiftRepository;
 
     @Transactional(readOnly = true)
     public String getNextStudentCode() {
@@ -38,15 +42,35 @@ public class StudentService {
     }
 
     @Transactional(readOnly = true)
+    public String getNextStudentIdNumber(String year) {
+        return personnelCodeGeneratorService.generateNextIdNumber("STUDENT", year);
+    }
+
+    @Transactional(readOnly = true)
     public PageResponse<StudentDto> getStudents(String search, String className, String grade, String status, Pageable pageable) {
+        return getStudents(search, className, grade, status, null, pageable);
+    }
+
+    @Transactional(readOnly = true)
+    public PageResponse<StudentDto> getStudents(String search, String className, String grade, String status, Long branchId, Pageable pageable) {
         Specification<Student> spec = (root, query, cb) -> {
             List<Predicate> predicates = new ArrayList<>();
             predicates.add(cb.isNull(root.get("deletedAt")));
+
+            String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+            if (activeTenant != null && !activeTenant.isBlank() && !"all".equalsIgnoreCase(activeTenant)) {
+                predicates.add(cb.equal(root.get("companyCode"), activeTenant.trim().toLowerCase()));
+            }
+
+            if (branchId != null) {
+                predicates.add(cb.equal(root.get("branch").get("id"), branchId));
+            }
 
             if (search != null && !search.trim().isEmpty()) {
                 String pattern = "%" + search.trim().toLowerCase() + "%";
                 predicates.add(cb.or(
                         cb.like(cb.lower(root.get("studentCode")), pattern),
+                        cb.like(cb.lower(root.get("idNumber")), pattern),
                         cb.like(cb.lower(root.get("englishName")), pattern),
                         cb.like(cb.lower(root.get("khmerName")), pattern)
                 ));
@@ -68,7 +92,16 @@ public class StudentService {
         };
 
         Page<Student> page = studentRepository.findAll(spec, pageable);
-        List<StudentDto> dtos = page.getContent().stream().map(this::toDto).collect(Collectors.toList());
+        List<com.zkteco.attendance.modules.shift.EmployeeSchedule> activeSchedules = scheduleRepository.findAllActiveSchedules(java.time.LocalDate.now());
+        Map<Long, String> stuShiftMap = new HashMap<>();
+        for (com.zkteco.attendance.modules.shift.EmployeeSchedule sch : activeSchedules) {
+            if (sch.getStudent() != null && sch.getShift() != null) {
+                stuShiftMap.put(sch.getStudent().getId(), sch.getShift().getName());
+            }
+        }
+        List<StudentDto> dtos = page.getContent().stream()
+                .map(s -> toDto(s, stuShiftMap.get(s.getId())))
+                .collect(Collectors.toList());
         return PageResponse.of(page, dtos);
     }
 
@@ -77,27 +110,60 @@ public class StudentService {
         Student s = studentRepository.findById(id)
                 .filter(st -> st.getDeletedAt() == null)
                 .orElseThrow(() -> new ResourceNotFoundException("Student", "id", id));
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if (!"all".equalsIgnoreCase(activeTenant) && !activeTenant.equalsIgnoreCase(s.getCompanyCode())) {
+            throw new ResourceNotFoundException("Student", "id", id);
+        }
         return toDto(s);
     }
 
     @Transactional
     public StudentDto createStudent(CreateStudentRequest request) {
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if ("all".equalsIgnoreCase(activeTenant)) activeTenant = "default";
+
         String code = request.getStudentCode();
         if (code == null || code.trim().isEmpty()) {
             code = personnelCodeGeneratorService.generateNextUniqueCode();
+            while (studentRepository.existsByCompanyCodeAndStudentCodeAndDeletedAtIsNull(activeTenant, code)) {
+                try {
+                    code = String.valueOf(Long.parseLong(code) + 1);
+                } catch (Exception e) {
+                    code = personnelCodeGeneratorService.generateNextUniqueCode();
+                }
+            }
         } else {
             // Enforce purely numeric codes (no letters or special characters)
             code = code.trim().replaceAll("[^0-9]", "");
             if (code.isEmpty()) {
                 code = personnelCodeGeneratorService.generateNextUniqueCode();
             }
-            if (studentRepository.existsByStudentCodeAndDeletedAtIsNull(code)) {
-                throw new AppException(ErrorCode.DUPLICATE_RESOURCE, "Student code already exists: " + code);
+            if (studentRepository.existsByCompanyCodeAndStudentCodeAndDeletedAtIsNull(activeTenant, code)) {
+                throw new AppException(ErrorCode.DUPLICATE_RESOURCE, "Student code already exists in your company: " + code);
             }
+        }
+
+        com.zkteco.attendance.modules.organization.Branch branch = null;
+        if (request.getBranchId() != null) {
+            branch = branchRepository.findById(request.getBranchId()).orElse(null);
+        } else {
+            // Default to first active branch
+            branch = branchRepository.findAll().stream().findFirst().orElse(null);
+        }
+
+        String idNumber = request.getIdNumber();
+        if (idNumber == null || idNumber.trim().isEmpty() || idNumber.trim().matches("^[0-9]{1,4}$") || idNumber.trim().matches("^(?i)FBIS[0-9]{0,2}$")) {
+            String yr = (idNumber != null && idNumber.replaceAll("[^0-9]", "").length() >= 2)
+                    ? idNumber
+                    : request.getAcademicYear();
+            idNumber = personnelCodeGeneratorService.generateNextIdNumber("STUDENT", yr);
+        } else {
+            idNumber = idNumber.trim();
         }
 
         Student s = Student.builder()
                 .studentCode(code)
+                .idNumber(idNumber)
                 .khmerName(request.getKhmerName())
                 .englishName(request.getEnglishName().trim())
                 .gender(request.getGender().toUpperCase())
@@ -106,15 +172,32 @@ public class StudentService {
                 .academicYear(request.getAcademicYear())
                 .parentContact(request.getParentContact())
                 .status(request.getStatus() != null ? request.getStatus().toUpperCase() : "ACTIVE")
+                .branch(branch)
                 .profileImageUrl(request.getProfileImageUrl())
+                .companyCode(activeTenant)
                 .build();
 
         Student saved = studentRepository.save(s);
+
+        if (request.getShiftId() != null) {
+            shiftRepository.findById(request.getShiftId()).ifPresent(shift -> {
+                com.zkteco.attendance.modules.shift.EmployeeSchedule schedule = com.zkteco.attendance.modules.shift.EmployeeSchedule.builder()
+                        .student(saved)
+                        .shift(shift)
+                        .effectiveFrom(java.time.LocalDate.now())
+                        .monday(true).tuesday(true).wednesday(true).thursday(true).friday(true).saturday(false).sunday(false)
+                        .build();
+                scheduleRepository.save(schedule);
+            });
+        }
+
         try {
             terminalSyncService.syncStudent(saved, request.getCardNumber());
         } catch (Exception ex) {
             // Non-blocking log
         }
+        auditLogService.record("CREATE_STUDENT", "STUDENT", String.valueOf(saved.getId()),
+                "Created student " + saved.getEnglishName() + " (Code: " + saved.getStudentCode() + ", Grade: " + saved.getGrade() + ", Class: " + saved.getClassName() + ")");
         return toDto(saved);
     }
 
@@ -124,11 +207,17 @@ public class StudentService {
                 .filter(st -> st.getDeletedAt() == null)
                 .orElseThrow(() -> new ResourceNotFoundException("Student", "id", id));
 
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if (!"all".equalsIgnoreCase(activeTenant) && !activeTenant.equalsIgnoreCase(s.getCompanyCode())) {
+            throw new ResourceNotFoundException("Student", "id", id);
+        }
+
         if (request.getStudentCode() != null && !request.getStudentCode().trim().isEmpty()) {
             String newCode = request.getStudentCode().trim().replaceAll("[^0-9]", "");
             if (!newCode.isEmpty() && !newCode.equalsIgnoreCase(s.getStudentCode())) {
-                if (studentRepository.existsByStudentCodeAndDeletedAtIsNull(newCode)) {
-                    throw new AppException(ErrorCode.DUPLICATE_RESOURCE, "Student code already exists: " + newCode);
+                String targetComp = s.getCompanyCode() != null ? s.getCompanyCode() : "default";
+                if (studentRepository.existsByCompanyCodeAndStudentCodeAndDeletedAtIsNull(targetComp, newCode)) {
+                    throw new AppException(ErrorCode.DUPLICATE_RESOURCE, "Student code already exists in your company: " + newCode);
                 }
                 String oldCode = s.getStudentCode();
                 s.setStudentCode(newCode);
@@ -164,14 +253,33 @@ public class StudentService {
         s.setAcademicYear(request.getAcademicYear());
         s.setParentContact(request.getParentContact());
         if (request.getStatus() != null) s.setStatus(request.getStatus().toUpperCase());
+        if (request.getBranchId() != null) s.setBranch(branchRepository.findById(request.getBranchId()).orElse(null));
         if (request.getProfileImageUrl() != null) s.setProfileImageUrl(request.getProfileImageUrl());
+        if (request.getIdNumber() != null && !request.getIdNumber().trim().isEmpty()) {
+            s.setIdNumber(request.getIdNumber().trim());
+        }
 
         Student saved = studentRepository.save(s);
+
+        if (request.getShiftId() != null) {
+            shiftRepository.findById(request.getShiftId()).ifPresent(shift -> {
+                com.zkteco.attendance.modules.shift.EmployeeSchedule schedule = com.zkteco.attendance.modules.shift.EmployeeSchedule.builder()
+                        .student(saved)
+                        .shift(shift)
+                        .effectiveFrom(java.time.LocalDate.now())
+                        .monday(true).tuesday(true).wednesday(true).thursday(true).friday(true).saturday(false).sunday(false)
+                        .build();
+                scheduleRepository.save(schedule);
+            });
+        }
+
         try {
             terminalSyncService.syncStudent(saved, request.getCardNumber());
         } catch (Exception ex) {
             // Non-blocking log
         }
+        auditLogService.record("UPDATE_STUDENT", "STUDENT", String.valueOf(saved.getId()),
+                "Updated student " + saved.getEnglishName() + " (Code: " + saved.getStudentCode() + ", Grade: " + saved.getGrade() + ", Class: " + saved.getClassName() + ")");
         return toDto(saved);
     }
 
@@ -183,9 +291,12 @@ public class StudentService {
 
         s.setStatus(status.toUpperCase().trim());
         Student saved = studentRepository.save(s);
+
         try {
             terminalSyncService.syncStudent(saved, null);
         } catch (Exception ignored) {}
+        auditLogService.record("UPDATE_STUDENT_STATUS", "STUDENT", String.valueOf(saved.getId()),
+                "Changed student status to " + status + " for " + saved.getEnglishName() + " (" + saved.getStudentCode() + ")");
         return toDto(saved);
     }
 
@@ -195,12 +306,30 @@ public class StudentService {
                 .filter(st -> st.getDeletedAt() == null)
                 .orElseThrow(() -> new ResourceNotFoundException("Student", "id", id));
 
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if (!"all".equalsIgnoreCase(activeTenant) && !activeTenant.equalsIgnoreCase(s.getCompanyCode())) {
+            throw new ResourceNotFoundException("Student", "id", id);
+        }
+
+        String originalPin = s.getStudentCode();
         s.setDeletedAt(Instant.now());
         s.setStatus("WITHDRAWN");
+        if (s.getStudentCode() != null && !s.getStudentCode().contains("_del_")) {
+            s.setStudentCode(s.getStudentCode() + "_del_" + s.getId());
+        }
+        if (s.getIdNumber() != null && !s.getIdNumber().contains("_del_")) {
+            s.setIdNumber(s.getIdNumber() + "_del_" + s.getId());
+        }
         studentRepository.save(s);
         try {
-            terminalSyncService.deleteUserFromPhysicalMachinesAsync(s.getStudentCode());
+            scheduleRepository.deleteByStudentId(s.getId());
+            deviceUserRepository.deleteByStudentId(s.getId());
+            if (originalPin != null && !originalPin.contains("_del_")) {
+                terminalSyncService.deleteUserFromPhysicalMachinesAsync(originalPin);
+            }
         } catch (Exception ignored) {}
+        auditLogService.record("DELETE_STUDENT", "STUDENT", String.valueOf(s.getId()),
+                "Withdrawn/deleted student " + s.getEnglishName() + " (" + s.getStudentCode() + ", Company: " + s.getCompanyCode() + ")");
     }
 
     @Transactional
@@ -370,10 +499,22 @@ public class StudentService {
     }
 
     public StudentDto toDto(Student s) {
+        String shiftName = null;
+        if (s != null && s.getId() != null) {
+            List<com.zkteco.attendance.modules.shift.EmployeeSchedule> active = scheduleRepository.findActiveStudentSchedules(s.getId(), java.time.LocalDate.now());
+            if (!active.isEmpty() && active.get(0).getShift() != null) {
+                shiftName = active.get(0).getShift().getName();
+            }
+        }
+        return toDto(s, shiftName);
+    }
+
+    public StudentDto toDto(Student s, String shiftName) {
         if (s == null) return null;
         return StudentDto.builder()
                 .id(s.getId())
                 .studentCode(s.getStudentCode())
+                .idNumber(s.getIdNumber())
                 .khmerName(s.getKhmerName())
                 .englishName(s.getEnglishName())
                 .gender(s.getGender())
@@ -382,7 +523,13 @@ public class StudentService {
                 .academicYear(s.getAcademicYear())
                 .parentContact(s.getParentContact())
                 .status(s.getStatus())
+                .branchId(s.getBranch() != null ? s.getBranch().getId() : null)
+                .branchName(s.getBranch() != null ? s.getBranch().getName() : null)
+                .branchCode(s.getBranch() != null ? s.getBranch().getCode() : null)
                 .profileImageUrl(s.getProfileImageUrl())
+                .companyCode(s.getCompanyCode())
+                .scheduleAssigned(shiftName != null)
+                .currentShiftName(shiftName)
                 .build();
     }
 }

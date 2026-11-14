@@ -22,5 +22,12 @@ public interface AttendanceRecordRepository extends JpaRepository<AttendanceReco
 
     @Query("SELECT COUNT(a) FROM AttendanceRecord a WHERE a.attendanceDate = :date AND a.status IN ('PRESENT', 'LATE', 'EARLY_DEPARTURE')")
     long countPresentToday(@Param("date") LocalDate date);
+
+    long countByCompanyCodeAndAttendanceDateAndStatus(String companyCode, LocalDate date, String status);
+
+    @Query("SELECT COUNT(a) FROM AttendanceRecord a WHERE a.companyCode = :companyCode AND a.attendanceDate = :date AND a.status IN ('PRESENT', 'LATE', 'EARLY_DEPARTURE')")
+    long countCompanyPresentToday(@Param("companyCode") String companyCode, @Param("date") LocalDate date);
+
+    List<AttendanceRecord> findByCompanyCodeAndAttendanceDate(String companyCode, LocalDate attendanceDate);
 }
 

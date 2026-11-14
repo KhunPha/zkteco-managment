@@ -46,6 +46,7 @@ public class JwtTokenProvider {
                 .subject(userPrincipal.getUsername())
                 .claim("userId", userPrincipal.getId())
                 .claim("email", userPrincipal.getEmail())
+                .claim("companyCode", userPrincipal.getCompanyCode())
                 .claim("authorities", authorities)
                 .issuedAt(Date.from(now))
                 .expiration(Date.from(expiryDate))

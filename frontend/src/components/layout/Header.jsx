@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Bell, Sun, Moon, Globe, Clock, Menu } from "lucide-react";
+import Link from "next/link";
+import { Bell, Sun, Moon, Globe, Clock, Menu, Building2, BookOpen } from "lucide-react";
 import { useThemeStore } from "@/stores/themeStore";
 import { useAuthStore } from "@/stores/authStore";
 import api from "@/lib/api";
@@ -9,8 +10,16 @@ import api from "@/lib/api";
 export default function Header() {
   const { darkMode, toggleDarkMode, language, setLanguage, toggleMobileSidebar } = useThemeStore();
   const { user } = useAuthStore();
+  const isSuperAdmin = user?.roles?.includes("SUPER_ADMIN");
   const [unreadCount, setUnreadCount] = useState(0);
   const [currentTime, setCurrentTime] = useState("");
+  const [activeCompanyCode, setActiveCompanyCode] = useState("default");
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      setActiveCompanyCode(localStorage.getItem("active_company_code") || "default");
+    }
+  }, []);
 
   useEffect(() => {
     const updateClock = () => {
@@ -50,7 +59,7 @@ export default function Header() {
 
         <div className="flex items-center gap-1.5 sm:gap-2 px-3 py-1.5 rounded-full bg-slate-100/90 dark:bg-slate-800/90 border border-slate-200/60 dark:border-slate-700/60 text-[11px] sm:text-xs font-medium text-slate-700 dark:text-slate-300 shadow-2xs">
           <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
-          <Clock size={13} className="text-indigo-600 dark:text-indigo-400 shrink-0 hidden xs:inline" />
+          <Clock size={13} className="text-indigo-600 dark:text-indigo-400 shrink-0 hidden sm:inline" />
           <span className="hidden md:inline text-slate-500 dark:text-slate-400 font-semibold">Phnom Penh:</span>
           <span className="font-mono font-bold text-slate-900 dark:text-white tracking-wider">
             {currentTime || "00:00:00"}
@@ -67,6 +76,46 @@ export default function Header() {
 
       {/* Quick Actions */}
       <div className="flex items-center gap-1.5 sm:gap-3">
+        {/* Active Tenant / Company Pill */}
+        {isSuperAdmin ? (
+          <Link
+            href="/companies"
+            className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200/60 dark:border-indigo-800/60 text-[11px] font-bold text-indigo-700 dark:text-indigo-300 hover:scale-105 active:scale-95 transition-all shadow-2xs"
+            title="SaaS Tenant Organization - ចុចដើម្បីប្តូរ ឬគ្រប់គ្រងក្រុមហ៊ុន"
+          >
+            <Building2 size={13} className="text-indigo-500 shrink-0" />
+            <span className="truncate max-w-[120px] lg:max-w-[160px]">
+              {activeCompanyCode === "default" ? "🏢 Main (HQ)" : `🏢 ${activeCompanyCode}`}
+            </span>
+            <span className="text-[9px] px-1.5 py-0.2 rounded bg-indigo-200/60 dark:bg-indigo-900/80 font-mono font-extrabold uppercase">
+              SaaS Owner
+            </span>
+          </Link>
+        ) : (
+          <div
+            className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-slate-100 dark:bg-slate-800 border border-slate-200/80 dark:border-slate-700/80 text-[11px] font-bold text-slate-700 dark:text-slate-300 shadow-2xs select-none"
+            title="Active Organization Space"
+          >
+            <Building2 size={13} className="text-indigo-500 shrink-0" />
+            <span className="truncate max-w-[120px] lg:max-w-[160px]">
+              🏢 {user?.companyCode || activeCompanyCode || "Company"}
+            </span>
+            <span className="text-[9px] px-1.5 py-0.2 rounded bg-slate-200 dark:bg-slate-700 font-mono font-extrabold uppercase text-slate-600 dark:text-slate-300">
+              Client
+            </span>
+          </div>
+        )}
+
+        {/* User Guide & Manual Link */}
+        <Link
+          href="/guide"
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-bold text-slate-700 dark:text-slate-200 bg-indigo-50/60 hover:bg-indigo-100 dark:bg-indigo-950/40 dark:hover:bg-indigo-900/60 border border-indigo-200/80 dark:border-indigo-800/80 hover:scale-105 active:scale-95 transition-all shadow-2xs"
+          title="User Manual & Picture Guide - សៀវភៅណែនាំរូបភាព"
+        >
+          <BookOpen size={15} className="text-indigo-600 dark:text-indigo-400" />
+          <span className="hidden md:inline">មគ្គុទ្ទេសក៍ (Guide)</span>
+        </Link>
+
         {/* Language Switcher */}
         <button
           onClick={() => setLanguage(language === "en" ? "kh" : "en")}
@@ -74,7 +123,7 @@ export default function Header() {
           title="Toggle Language"
         >
           <Globe size={15} />
-          <span className="hidden xs:inline">{language === "en" ? "EN" : "KH ខ្មែរ"}</span>
+          <span className="hidden sm:inline">{language === "en" ? "EN" : "KH ខ្មែរ"}</span>
         </button>
 
         {/* Dark Mode Toggle */}

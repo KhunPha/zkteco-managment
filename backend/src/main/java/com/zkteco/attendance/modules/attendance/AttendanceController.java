@@ -13,9 +13,11 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.data.web.PageableDefault;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.time.LocalDate;
 import java.util.List;
@@ -27,6 +29,12 @@ import java.util.List;
 public class AttendanceController {
 
     private final AttendanceService attendanceService;
+
+    @GetMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    @Operation(summary = "Real-time Server-Sent Events stream for instant live punch notifications")
+    public SseEmitter streamLiveScans(@RequestParam(required = false) String companyCode) {
+        return attendanceService.subscribeToLiveScans(companyCode);
+    }
 
     @GetMapping
     @PreAuthorize("hasAuthority('attendance.read') or hasRole('SUPER_ADMIN') or hasRole('ADMIN') or hasRole('HR_MANAGER')")
@@ -55,6 +63,25 @@ public class AttendanceController {
     public ResponseEntity<ApiResponse<List<LiveScanEventDto>>> getLiveScans(
             @RequestParam(defaultValue = "15") int limit) {
         return ResponseEntity.ok(ApiResponse.ok(attendanceService.getLiveScans(limit)));
+    }
+
+    @GetMapping("/punches")
+    @PreAuthorize("hasAuthority('attendance.read') or hasRole('SUPER_ADMIN') or hasRole('ADMIN') or hasRole('HR_MANAGER')")
+    @Operation(summary = "Get paginated punch events with resolved personnel metadata and filters")
+    public ResponseEntity<ApiResponse<PageResponse<LiveScanEventDto>>> getPunches(
+            @RequestParam(required = false) String search,
+            @RequestParam(required = false) String verifyType,
+            @RequestParam(required = false) String punchState,
+            @RequestParam(required = false) Long deviceId,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
+            @PageableDefault(size = 25, sort = "punchTime", direction = org.springframework.data.domain.Sort.Direction.DESC) Pageable pageable) {
+        return ResponseEntity.ok(ApiResponse.ok(attendanceService.getPunches(search, verifyType, punchState, deviceId, date, pageable)));
+    }
+
+    @GetMapping("/punch-stats")
+    @Operation(summary = "Get today punch stats")
+    public ResponseEntity<ApiResponse<java.util.Map<String, Object>>> getPunchStats() {
+        return ResponseEntity.ok(ApiResponse.ok(attendanceService.getPunchStats()));
     }
 
     @GetMapping("/raw-logs")

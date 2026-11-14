@@ -40,6 +40,14 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                 authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
 
                 SecurityContextHolder.getContext().setAuthentication(authentication);
+
+                if (userDetails instanceof UserPrincipal up) {
+                    boolean isSuperAdmin = up.getAuthorities().stream()
+                            .anyMatch(a -> "ROLE_SUPER_ADMIN".equals(a.getAuthority()));
+                    if (!isSuperAdmin && StringUtils.hasText(up.getCompanyCode())) {
+                        com.zkteco.attendance.modules.tenant.TenantContext.setTenantId(up.getCompanyCode().trim().toLowerCase());
+                    }
+                }
             }
         } catch (Exception ex) {
             log.error("Could not set user authentication in security context", ex);

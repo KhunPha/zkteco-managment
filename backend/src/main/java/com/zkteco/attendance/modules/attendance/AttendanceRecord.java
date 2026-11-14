@@ -93,6 +93,10 @@ public class AttendanceRecord extends BaseEntity {
     @Column(name = "is_manual_adjusted", nullable = false)
     private boolean manualAdjusted = false;
 
+    @Builder.Default
+    @Column(name = "company_code", nullable = false, length = 50)
+    private String companyCode = "default";
+
     @Column(columnDefinition = "TEXT")
     private String remarks;
 }

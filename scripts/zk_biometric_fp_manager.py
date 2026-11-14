@@ -42,6 +42,19 @@ def resolve_target(ip, default_port=4370):
         except Exception:
             pass
 
+    # If endpoint is Cloud-Push, empty, or non-IP, automatically route to physical LAN terminal
+    if not ip_str or "cloud" in ip_str.lower() or ip_str.isdigit():
+        candidate = "192.168.1.202"
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.5)
+            s.connect((candidate, 4370))
+            s.close()
+            logger.info(f"Routed non-TCP/Cloud endpoint '{ip}' -> physical terminal {candidate}:4370")
+            return candidate, 4370
+        except Exception:
+            return "192.168.1.201", 4370
+
     if ip_str == "203.147.129.237":
         candidate = "192.168.1.201" if port == 4371 else "192.168.1.202"
         try:
@@ -214,7 +227,8 @@ def enroll_remote_fingerprint(target_ip, pin, fid=0):
         user = next((u for u in users if str(u.user_id) == str(pin)), None)
         if not user:
             # If user does not exist on machine yet, add them
-            numeric_uid = int("".join(filter(str.isdigit, str(pin)))) if any(c.isdigit() for c in str(pin)) else 1000
+            raw_num = int("".join(filter(str.isdigit, str(pin)))) if any(c.isdigit() for c in str(pin)) else 1000
+            numeric_uid = raw_num if (0 < raw_num <= 65535) else ((raw_num % 65000) + 1)
             conn.set_user(uid=numeric_uid, name=str(pin), privilege=0, password="", group_id="", user_id=str(pin), card=0)
             user = next((u for u in conn.get_users() if str(u.user_id) == str(pin)), None)
 
@@ -413,11 +427,16 @@ def main():
     parser.add_argument("--action", required=True, choices=["sync-all", "enroll-remote", "list-templates", "clear-all", "clear-faces", "clear-all-biometrics"])
     parser.add_argument("--ip", default="192.168.1.202")
     parser.add_argument("--pin", default="")
-    parser.add_argument("--fid", type=int, default=0)
-
-    args = parser.parse_args()
+    parser.add_argument("--fid", default="0")
 
     try:
+        args = parser.parse_args()
+    except SystemExit:
+        print(json.dumps({"success": False, "message": f"Invalid command line parameters: {sys.argv[1:]}"}))
+        sys.exit(0)
+
+    try:
+        fid = int(str(args.fid).strip()) if str(args.fid).strip().isdigit() else 0
         if args.action == "clear-all":
             res = clear_all_fingerprints()
             print(json.dumps(res))
@@ -431,10 +450,11 @@ def main():
             res = sync_all_templates()
             print(json.dumps(res))
         elif args.action == "enroll-remote":
-            if not args.pin:
-                print(json.dumps({"success": False, "message": "--pin is required for remote enrollment"}))
+            clean_pin = str(args.pin or "").strip()
+            if not clean_pin:
+                print(json.dumps({"success": False, "message": "Valid numeric user PIN is required for remote enrollment"}))
                 sys.exit(0)
-            res = enroll_remote_fingerprint(args.ip, args.pin, args.fid)
+            res = enroll_remote_fingerprint(args.ip, clean_pin, fid)
             print(json.dumps(res))
         elif args.action == "list-templates":
             db = get_db()

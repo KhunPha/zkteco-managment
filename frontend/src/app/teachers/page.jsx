@@ -18,46 +18,55 @@ import {
   Calendar,
   X,
   Camera,
+  Activity,
+  GitFork,
+  Clock,
+  AlertTriangle,
 } from "lucide-react";
+import Link from "next/link";
 import api from "@/lib/api";
 import { formatDate } from "@/lib/utils";
 import ImageUploadDropzone from "@/components/common/ImageUploadDropzone";
 import Portal from "@/components/common/Portal";
 import WebcamFaceEnrollModal from "@/components/biometrics/WebcamFaceEnrollModal";
+import KhmerPhoneInput from "@/components/common/KhmerPhoneInput";
 
 export default function TeachersPage() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
+  const [branchId, setBranchId] = useState("");
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(25);
   const [showModal, setShowModal] = useState(false);
   const [editingTeacherId, setEditingTeacherId] = useState(null);
   const [faceEnrollPerson, setFaceEnrollPerson] = useState(null);
 
-  const initialForm = {
+  const [formData, setFormData] = useState({
     employeeCode: "",
+    idNumber: "",
     englishName: "",
     khmerName: "",
     gender: "FEMALE",
     email: "",
     phoneNumber: "",
-    departmentId: "4", // Academic Affairs
-    positionId: "4",   // Lecturer / Instructor
-    branchId: "1",     // Main Campus
+    departmentId: "",
+    positionId: "",
+    branchId: "",
     employmentType: "FULL_TIME",
     employmentStartDate: new Date().toISOString().split("T")[0],
     employmentStatus: "ACTIVE",
     profileImageUrl: "",
-  };
-
-  const [formData, setFormData] = useState(initialForm);
+    shiftId: "",
+  });
   const [loadingNextCode, setLoadingNextCode] = useState(false);
+  const [batchYear, setBatchYear] = useState("26");
+  const [loadingNextId, setLoadingNextId] = useState(false);
 
   const fetchNextTeacherCode = async () => {
     setLoadingNextCode(true);
     try {
-      const res = await api.get("/api/v1/employees/next-code");
+      const res = await api.get("/api/v1/teachers/next-code");
       if (res.data?.data?.nextCode) {
         setFormData((prev) => ({ ...prev, employeeCode: res.data.data.nextCode }));
       }
@@ -68,11 +77,27 @@ export default function TeachersPage() {
     }
   };
 
-  const openCreateModal = async () => {
-    setEditingTeacherId(null);
-    setFormData(initialForm);
-    setShowModal(true);
-    await fetchNextTeacherCode();
+  const fetchNextTeacherId = async (yr) => {
+    const yearToFetch = yr !== undefined ? yr : batchYear;
+    setLoadingNextId(true);
+    try {
+      const res = await api.get(`/api/v1/teachers/next-id-number?year=${yearToFetch}`);
+      if (res.data?.data?.nextIdNumber) {
+        setFormData((prev) => ({ ...prev, idNumber: res.data.data.nextIdNumber }));
+      }
+    } catch (err) {
+      console.warn("Failed to fetch next teacher ID", err);
+    } finally {
+      setLoadingNextId(false);
+    }
+  };
+
+  const handleYearChange = (yr) => {
+    const cleaned = yr.replace(/\D/g, "").slice(-2);
+    setBatchYear(cleaned);
+    if (cleaned.length >= 1) {
+      fetchNextTeacherId(cleaned);
+    }
   };
 
   const { data: departments = [] } = useQuery({
@@ -99,13 +124,81 @@ export default function TeachersPage() {
     },
   });
 
-  // Query employees with Academic Affairs department (ID 4) or Teacher search
-  const { data: teachersData, isLoading, refetch } = useQuery({
-    queryKey: ["teachers", search, status, page, pageSize],
+  const { data: shifts = [] } = useQuery({
+    queryKey: ["all-shifts"],
     queryFn: async () => {
-      let url = `/api/v1/employees?departmentId=4&page=${page}&size=${pageSize}`;
+      const res = await api.get("/api/v1/shifts");
+      return res.data?.data || [];
+    },
+  });
+
+  const { data: unassignedSummary } = useQuery({
+    queryKey: ["unassigned-summary"],
+    queryFn: async () => {
+      const res = await api.get("/api/v1/schedules/unassigned-summary");
+      return res.data?.data;
+    },
+  });
+
+  // Dynamically resolve Academic / Teaching department across all tenant institutions
+  const acadDept = departments?.find(
+    (d) => d.code === "ACAD" || d.name?.toLowerCase().includes("acad") || d.name?.toLowerCase().includes("teach")
+  );
+  const acadDeptId = acadDept?.id;
+
+  // Dynamically resolve teacher position & default branch for the current tenant
+  const teacherPosition = positions?.find(
+    (p) =>
+      p.title?.toLowerCase().includes("lecturer") ||
+      p.title?.toLowerCase().includes("instructor") ||
+      p.title?.toLowerCase().includes("teacher")
+  );
+  const defaultBranch = branches?.[0]; // first branch for the current tenant
+
+  // Build a dynamic initial form using tenant-specific IDs resolved from loaded data
+  // NOTE: must be defined AFTER acadDeptId, teacherPosition, defaultBranch
+  const getInitialForm = () => ({
+    employeeCode: "",
+    idNumber: "",
+    englishName: "",
+    khmerName: "",
+    gender: "FEMALE",
+    email: "",
+    phoneNumber: "",
+    departmentId: acadDeptId ? String(acadDeptId) : "",        // tenant's ACAD dept
+    positionId: teacherPosition?.id ? String(teacherPosition.id) : "", // tenant's teacher position
+    branchId: defaultBranch?.id ? String(defaultBranch.id) : "",       // tenant's first branch
+    employmentType: "FULL_TIME",
+    employmentStartDate: new Date().toISOString().split("T")[0],
+    employmentStatus: "ACTIVE",
+    profileImageUrl: "",
+    shiftId: "",
+  });
+
+  const openCreateModal = async () => {
+    setEditingTeacherId(null);
+    const initialYear = "26";
+    setBatchYear(initialYear);
+    const initialForm = getInitialForm();
+    const teacherShift = shifts?.find((s) => s.name?.toLowerCase().includes("teacher") || s.name?.toLowerCase().includes("faculty"));
+    if (teacherShift) {
+      initialForm.shiftId = String(teacherShift.id);
+    } else if (shifts?.[0]?.id) {
+      initialForm.shiftId = String(shifts[0].id);
+    }
+    setFormData(initialForm);
+    setShowModal(true);
+    await Promise.all([fetchNextTeacherCode(), fetchNextTeacherId(initialYear)]);
+  };
+
+  // Query dedicated teachers endpoint
+  const { data: teachersData, isLoading, refetch } = useQuery({
+    queryKey: ["teachers", search, status, branchId, page, pageSize],
+    queryFn: async () => {
+      let url = `/api/v1/teachers?page=${page}&size=${pageSize}`;
       if (search) url += `&search=${encodeURIComponent(search)}`;
       if (status) url += `&status=${status}`;
+      if (branchId) url += `&branchId=${branchId}`;
       const res = await api.get(url);
       return res.data?.data;
     },
@@ -118,13 +211,15 @@ export default function TeachersPage() {
         departmentId: payload.departmentId ? Number(payload.departmentId) : null,
         positionId: payload.positionId ? Number(payload.positionId) : null,
         branchId: payload.branchId ? Number(payload.branchId) : null,
+        staffType: "TEACHER",
+        isTeacher: true,
       };
 
       if (editingTeacherId) {
-        const res = await api.put(`/api/v1/employees/${editingTeacherId}`, cleanPayload);
+        const res = await api.put(`/api/v1/teachers/${editingTeacherId}`, cleanPayload);
         return res.data?.data;
       } else {
-        const res = await api.post("/api/v1/employees", cleanPayload);
+        const res = await api.post("/api/v1/teachers", cleanPayload);
         return res.data?.data;
       }
     },
@@ -133,7 +228,7 @@ export default function TeachersPage() {
       queryClient.invalidateQueries(["employees"]);
       setShowModal(false);
       setEditingTeacherId(null);
-      setFormData(initialForm);
+      setFormData(getInitialForm());
     },
     onError: (err) => {
       alert("Error saving teacher: " + (err.response?.data?.message || err.message));
@@ -142,7 +237,7 @@ export default function TeachersPage() {
 
   const updateTeacherStatusMutation = useMutation({
     mutationFn: async ({ id, newStatus }) => {
-      const res = await api.put(`/api/v1/employees/${id}/status?status=${newStatus}`);
+      const res = await api.put(`/api/v1/teachers/${id}/status?status=${newStatus}`);
       return res.data?.data;
     },
     onSuccess: () => {
@@ -158,16 +253,24 @@ export default function TeachersPage() {
 
   const openEditModal = (teacher) => {
     setEditingTeacherId(teacher.id);
+    let extractedYear = "26";
+    if (teacher.idNumber && teacher.idNumber.match(/^FBIST(\d{2})/i)) {
+      extractedYear = teacher.idNumber.match(/^FBIST(\d{2})/i)[1];
+    } else if (teacher.employmentStartDate) {
+      extractedYear = teacher.employmentStartDate.slice(2, 4);
+    }
+    setBatchYear(extractedYear);
     setFormData({
       employeeCode: teacher.employeeCode,
+      idNumber: teacher.idNumber || "",
       englishName: teacher.englishName,
       khmerName: teacher.khmerName || "",
       gender: teacher.gender || "FEMALE",
       email: teacher.email || "",
       phoneNumber: teacher.phoneNumber || "",
-      departmentId: teacher.departmentId ? String(teacher.departmentId) : "4",
-      positionId: teacher.positionId ? String(teacher.positionId) : "4",
-      branchId: teacher.branchId ? String(teacher.branchId) : "1",
+      departmentId: teacher.departmentId ? String(teacher.departmentId) : (acadDeptId ? String(acadDeptId) : ""),
+      positionId: teacher.positionId ? String(teacher.positionId) : (teacherPosition?.id ? String(teacherPosition.id) : ""),
+      branchId: teacher.branchId ? String(teacher.branchId) : (defaultBranch?.id ? String(defaultBranch.id) : ""),
       employmentType: teacher.employmentType || "FULL_TIME",
       employmentStartDate: teacher.employmentStartDate || new Date().toISOString().split("T")[0],
       employmentStatus: teacher.employmentStatus || "ACTIVE",
@@ -179,16 +282,18 @@ export default function TeachersPage() {
   const deleteTeacher = async (id) => {
     if (!confirm("Are you sure you want to delete this teacher profile?")) return;
     try {
-      await api.delete(`/api/v1/employees/${id}`);
+      await api.delete(`/api/v1/teachers/${id}`);
       queryClient.invalidateQueries(["teachers"]);
       queryClient.invalidateQueries(["employees"]);
+      queryClient.invalidateQueries(["all-schedules"]);
+      queryClient.invalidateQueries(["unassigned-summary"]);
     } catch (err) {
       alert("Error: " + (err.response?.data?.message || err.message));
     }
   };
 
   const teachers = teachersData?.content || [];
-  const totalTeachers = teachers.length;
+  const totalTeachers = teachersData?.totalElements || teachers.length;
   const activeTeachers = teachers.filter((t) => t.employmentStatus === "ACTIVE").length;
 
   return (
@@ -249,30 +354,77 @@ export default function TeachersPage() {
         </div>
       </div>
 
+      {/* Schedule Alert Banner */}
+      {unassignedSummary?.unassignedTeachersCount > 0 && (
+        <div className="bg-amber-50/90 dark:bg-amber-950/40 border border-amber-200/90 dark:border-amber-800 rounded-2xl p-4 shadow-xs text-amber-950 dark:text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-in fade-in duration-300">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-amber-100 dark:bg-amber-900/60 text-amber-700 dark:text-amber-300 flex items-center justify-center shrink-0">
+              <AlertTriangle size={20} />
+            </div>
+            <div>
+              <h4 className="font-bold text-sm text-amber-900 dark:text-amber-200">
+                Schedule Assignment Alert: {unassignedSummary.unassignedTeachersCount} Teacher{unassignedSummary.unassignedTeachersCount > 1 ? "s" : ""} Unassigned
+              </h4>
+              <p className="text-xs text-amber-800/90 dark:text-amber-300/90 mt-0.5">
+                Faculty members without an assigned shift schedule cannot track their morning/afternoon instructional shifts.
+              </p>
+            </div>
+          </div>
+          <Link
+            href="/schedules"
+            className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-xl text-xs transition-colors shadow-xs shrink-0 flex items-center gap-1.5"
+          >
+            <span>Assign in Schedules &rarr;</span>
+          </Link>
+        </div>
+      )}
+
       {/* Filter Strip */}
       <div className="flex flex-wrap items-center justify-between gap-3 p-3.5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
         <div className="flex flex-wrap items-center gap-3 flex-1 text-xs">
-          <div className="relative min-w-[240px]">
-            <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+          <div className="h-10 flex items-center gap-2.5 min-w-[240px] px-3.5 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus-within:ring-2 focus-within:ring-teal-500/30 focus-within:border-teal-500 dark:focus-within:border-teal-400 transition-all">
+            <Search size={16} className="text-slate-400 dark:text-slate-500 shrink-0 pointer-events-none select-none" />
             <input
               type="text"
               placeholder="Search teacher by name or code..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-full pl-9 pr-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500 font-medium"
+              className="w-full bg-transparent border-none text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:ring-0 font-medium text-xs p-0 leading-normal"
             />
           </div>
 
-          <select
-            value={status}
-            onChange={(e) => setStatus(e.target.value)}
-            className="px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500 font-medium cursor-pointer"
-          >
-            <option value="">All Statuses</option>
-            <option value="ACTIVE">Active</option>
-            <option value="PROBATION">Probation</option>
-            <option value="SUSPENDED">Suspended</option>
-          </select>
+          <div className="h-10 flex items-center gap-2 px-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus-within:ring-2 focus-within:ring-teal-500/30 focus-within:border-teal-500 transition-all">
+            <Activity size={15} className="text-slate-400 shrink-0 pointer-events-none" />
+            <select
+              value={status}
+              onChange={(e) => setStatus(e.target.value)}
+              className="bg-transparent border-none text-slate-900 dark:text-white focus:outline-none focus:ring-0 font-semibold cursor-pointer p-0 leading-normal"
+            >
+              <option value="" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">All Statuses</option>
+              <option value="ACTIVE" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Active</option>
+              <option value="PROBATION" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Probation</option>
+              <option value="SUSPENDED" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Suspended</option>
+            </select>
+          </div>
+
+          <div className="h-10 flex items-center gap-2 px-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus-within:ring-2 focus-within:ring-teal-500/30 focus-within:border-teal-500 transition-all">
+            <GitFork size={15} className="text-slate-400 shrink-0 pointer-events-none" />
+            <select
+              value={branchId}
+              onChange={(e) => {
+                setBranchId(e.target.value);
+                setPage(0);
+              }}
+              className="bg-transparent border-none text-slate-900 dark:text-white focus:outline-none focus:ring-0 font-semibold cursor-pointer p-0 leading-normal"
+            >
+              <option value="" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">All Branches (គ្រប់សាខា)</option>
+              {branches?.map((b) => (
+                <option key={b.id} value={b.id} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">
+                  📍 {b.name} ({b.code})
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
 
         <button
@@ -296,9 +448,13 @@ export default function TeachersPage() {
             <thead className="bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wider text-[11px]">
               <tr>
                 <th className="py-3 px-4">Teacher</th>
+                <th className="py-3 px-4">Teacher ID (អត្តលេខ)</th>
+                <th className="py-3 px-4">Code / PIN</th>
                 <th className="py-3 px-4">Khmer Name</th>
                 <th className="py-3 px-4">Gender</th>
                 <th className="py-3 px-4">Position / Title</th>
+                <th className="py-3 px-4">Branch (សាខា)</th>
+                <th className="py-3 px-4">Shift / Schedule</th>
                 <th className="py-3 px-4">Contact</th>
                 <th className="py-3 px-4">Start Date</th>
                 <th className="py-3 px-4">Status</th>
@@ -308,11 +464,11 @@ export default function TeachersPage() {
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
               {isLoading ? (
                 <tr>
-                  <td colSpan={8} className="py-12 text-center text-slate-400">Loading teachers...</td>
+                  <td colSpan={12} className="py-12 text-center text-slate-400">Loading teachers...</td>
                 </tr>
               ) : teachers.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="py-16 text-center text-slate-400">
+                  <td colSpan={12} className="py-16 text-center text-slate-400">
                     <BookOpen size={36} className="mx-auto mb-2 opacity-40 text-teal-500" />
                     <p className="font-bold text-slate-700 dark:text-slate-300">No teachers found</p>
                     <p className="text-[11px] mt-0.5">Click "Add New Teacher" above to register faculty</p>
@@ -332,9 +488,19 @@ export default function TeachersPage() {
                         </div>
                         <div>
                           <p className="font-bold text-slate-900 dark:text-white text-sm">{t.englishName}</p>
-                          <span className="font-mono text-[10px] text-teal-600 dark:text-teal-400 font-semibold">{t.employeeCode}</span>
+                          <span className="text-[10px] text-slate-400">{t.email || "Faculty"}</span>
                         </div>
                       </div>
+                    </td>
+                    <td className="py-3 px-4">
+                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-lg text-xs font-bold font-mono bg-teal-50 dark:bg-teal-950/60 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800">
+                        {t.idNumber || ("FBIST" + String(t.employeeCode).padStart(4, "0"))}
+                      </span>
+                    </td>
+                    <td className="py-3 px-4">
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-bold font-mono bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700">
+                        PIN: {t.employeeCode}
+                      </span>
                     </td>
                     <td className="py-3 px-4 font-semibold text-slate-800 dark:text-slate-200">
                       {t.khmerName || "-"}
@@ -349,6 +515,29 @@ export default function TeachersPage() {
                         <p className="font-semibold text-slate-800 dark:text-slate-200">{t.positionTitle || "Lecturer / Instructor"}</p>
                         <span className="text-[10px] text-slate-400">{t.departmentName || "Academic Affairs"}</span>
                       </div>
+                    </td>
+                    <td className="py-3 px-4">
+                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800/60 whitespace-nowrap">
+                        <GitFork size={12} className="text-indigo-500 shrink-0" />
+                        <span>{t.branchName || "Branch 1"}</span>
+                      </span>
+                    </td>
+                    <td className="py-3 px-4">
+                      {t.scheduleAssigned ? (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 whitespace-nowrap">
+                          <Clock size={11} className="text-emerald-500 shrink-0" />
+                          <span>{t.currentShiftName || "Assigned"}</span>
+                        </span>
+                      ) : (
+                        <Link
+                          href="/schedules"
+                          className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 border border-amber-300 dark:border-amber-700 hover:bg-amber-100 transition-colors whitespace-nowrap"
+                          title="Click to assign schedule"
+                        >
+                          <AlertTriangle size={11} className="text-amber-600 shrink-0" />
+                          <span>Not Assigned</span>
+                        </Link>
+                      )}
                     </td>
                     <td className="py-3 px-4 space-y-0.5">
                       {t.email && (
@@ -529,6 +718,62 @@ export default function TeachersPage() {
                   <div>
                     <div className="flex items-center justify-between mb-1">
                       <label className="font-semibold text-slate-700 dark:text-slate-300">
+                        Teacher ID (អត្តលេខ)
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => fetchNextTeacherId(batchYear)}
+                        disabled={loadingNextId}
+                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-teal-600 dark:text-teal-400 hover:underline cursor-pointer"
+                        title="Calculate next sequential ID for chosen year"
+                      >
+                        <RefreshCw size={11} className={loadingNextId ? "animate-spin" : ""} />
+                        <span>{loadingNextId ? "Generating..." : "Auto ID"}</span>
+                      </button>
+                    </div>
+
+                    {/* Batch Year Selector Chips */}
+                    <div className="flex items-center gap-1.5 mb-1.5">
+                      <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">Year:</span>
+                      {["25", "26", "27", "28"].map((yr) => (
+                        <button
+                          key={yr}
+                          type="button"
+                          onClick={() => handleYearChange(yr)}
+                          className={`px-2 py-0.5 rounded-md text-xs font-bold transition-all cursor-pointer ${
+                            batchYear === yr
+                              ? "bg-teal-600 text-white shadow-sm"
+                              : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700"
+                          }`}
+                        >
+                          {yr}
+                        </button>
+                      ))}
+                      <input
+                        type="text"
+                        maxLength={2}
+                        placeholder="YY"
+                        value={batchYear}
+                        onChange={(e) => handleYearChange(e.target.value)}
+                        className="w-10 px-1 py-0.5 text-xs text-center rounded-md bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 font-bold text-slate-800 dark:text-white"
+                        title="Custom 2-digit Year (e.g. 24, 25, 26, 27)"
+                      />
+                    </div>
+
+                    <input
+                      type="text"
+                      placeholder="e.g. FBIST260001"
+                      value={formData.idNumber}
+                      onChange={(e) => setFormData({ ...formData, idNumber: e.target.value.toUpperCase() })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500 font-mono font-bold"
+                    />
+                    <p className="text-[10px] text-teal-600 dark:text-teal-400 mt-1 font-medium">
+                      ✓ Auto ID: FBIST + Year ({batchYear}) + 4-digit auto index ({formData.idNumber || `FBIST${batchYear}0001`})
+                    </p>
+                  </div>
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="font-semibold text-slate-700 dark:text-slate-300">
                         Teacher Code / Terminal PIN *
                       </label>
                       {!editingTeacherId && (
@@ -540,7 +785,7 @@ export default function TeachersPage() {
                           title="Generate fresh unique PIN"
                         >
                           <RefreshCw size={11} className={loadingNextCode ? "animate-spin" : ""} />
-                          Auto-Generated
+                          <span>{loadingNextCode ? "Generating..." : "Auto-Generated"}</span>
                         </button>
                       )}
                     </div>
@@ -549,7 +794,7 @@ export default function TeachersPage() {
                       inputMode="numeric"
                       pattern="[0-9]*"
                       disabled={!!editingTeacherId}
-                      placeholder="e.g. 40002"
+                      placeholder="Auto-generated PIN (e.g. 1)"
                       value={formData.employeeCode}
                       onChange={(e) => setFormData({ ...formData, employeeCode: e.target.value.replace(/\D/g, "") })}
                       className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500 font-mono disabled:opacity-50"
@@ -558,6 +803,9 @@ export default function TeachersPage() {
                       ✓ System auto-generates non-colliding numeric PIN across all personnel and machines.
                     </p>
                   </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">
                       Gender *
@@ -569,6 +817,22 @@ export default function TeachersPage() {
                     >
                       <option value="FEMALE">Female</option>
                       <option value="MALE">Male</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">
+                      Campus / Branch
+                    </label>
+                    <select
+                      value={formData.branchId}
+                      onChange={(e) => setFormData({ ...formData, branchId: e.target.value })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500 cursor-pointer"
+                    >
+                      {branches?.map((b) => (
+                        <option key={b.id} value={b.id}>
+                          {b.name}
+                        </option>
+                      ))}
                     </select>
                   </div>
                 </div>
@@ -653,12 +917,9 @@ export default function TeachersPage() {
                     <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">
                       Phone Number
                     </label>
-                    <input
-                      type="text"
-                      placeholder="+855 12 345 678"
+                    <KhmerPhoneInput
                       value={formData.phoneNumber}
-                      onChange={(e) => setFormData({ ...formData, phoneNumber: e.target.value })}
-                      className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500"
+                      onChange={(val) => setFormData({ ...formData, phoneNumber: val })}
                     />
                   </div>
                 </div>
@@ -689,6 +950,25 @@ export default function TeachersPage() {
                       className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500 cursor-pointer"
                     />
                   </div>
+                </div>
+
+                <div>
+                  <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">
+                    Assigned Shift / Schedule (វេនបង្រៀន)
+                  </label>
+                  <select
+                    value={formData.shiftId}
+                    onChange={(e) => setFormData({ ...formData, shiftId: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500 text-xs cursor-pointer"
+                  >
+                    <option value="">Select Shift (Optional)</option>
+                    {shifts?.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name} ({s.startTime} - {s.endTime})
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[10px] text-slate-400 mt-1">If selected, an active recurring teaching shift will automatically be created for this faculty member.</p>
                 </div>
               </div>
 

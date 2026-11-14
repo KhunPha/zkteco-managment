@@ -38,6 +38,29 @@ public class DeviceUserDto {
     private String status; // ACTIVE, INACTIVE
     private String profileImageUrl;
     private String personnelKhmerName;
+    private String companyCode;
     private Instant lastSyncedAt;
+
+    private java.util.List<Long> deviceIds;
+    private java.util.List<String> deviceNames;
+    private java.util.List<String> deviceSerialNumbers;
+    private java.util.List<Long> allDeviceUserIds;
+    private int deviceCount;
+    private java.util.List<DeviceInfo> syncedDevices;
+
+    @Data
+    @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class DeviceInfo {
+        private Long deviceId;
+        private String deviceName;
+        private String deviceSerialNumber;
+        private String ipAddress;
+        private int port;
+        private String integrationType;
+        private Long deviceUserId;
+        private String syncStatus;
+    }
 }
 

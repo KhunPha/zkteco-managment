@@ -18,6 +18,10 @@ public class AuditLog {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    @Column(name = "company_code", nullable = false, length = 100)
+    @Builder.Default
+    private String companyCode = "default";
+
     @Column(name = "user_id")
     private Long userId;
 
@@ -49,4 +53,3 @@ public class AuditLog {
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt = Instant.now();
 }
-

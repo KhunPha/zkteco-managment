@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Building2, Plus, Trash2, RefreshCw } from "lucide-react";
+import { Building2, Plus, Trash2, RefreshCw, Briefcase, ArrowRight } from "lucide-react";
+import Link from "next/link";
 import api from "@/lib/api";
 import Portal from "@/components/common/Portal";
 
@@ -13,7 +14,6 @@ export default function DepartmentsPage() {
   const [formData, setFormData] = useState({
     code: "",
     name: "",
-    branchId: "",
   });
 
   const { data: departments, isLoading } = useQuery({
@@ -24,23 +24,19 @@ export default function DepartmentsPage() {
     },
   });
 
-  const { data: branches } = useQuery({
-    queryKey: ["all-branches"],
-    queryFn: async () => {
-      const res = await api.get("/api/v1/branches");
-      return res.data?.data || [];
-    },
-  });
-
   const createMutation = useMutation({
     mutationFn: async (payload) => {
-      const res = await api.post("/api/v1/departments", payload);
+      const res = await api.post("/api/v1/departments", {
+        code: payload.code.trim().toUpperCase(),
+        name: payload.name.trim(),
+        branchId: null,
+      });
       return res.data?.data;
     },
     onSuccess: () => {
       queryClient.invalidateQueries(["all-departments"]);
       setShowModal(false);
-      setFormData({ code: "", name: "", branchId: "" });
+      setFormData({ code: "", name: "" });
     },
   });
 
@@ -66,13 +62,23 @@ export default function DepartmentsPage() {
             Organizational units, academic faculties, and operational cost centers
           </p>
         </div>
-        <button
-          onClick={() => setShowModal(true)}
-          className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs shadow-md shadow-indigo-600/20 transition-all self-start sm:self-auto"
-        >
-          <Plus size={16} />
-          <span>Add Department</span>
-        </button>
+        <div className="flex items-center gap-2.5 self-start sm:self-auto">
+          <Link
+            href="/positions"
+            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-semibold text-xs transition-all border border-slate-200 dark:border-slate-700"
+          >
+            <Briefcase size={15} className="text-indigo-600 dark:text-indigo-400" />
+            <span>Manage Job Titles / Positions</span>
+            <ArrowRight size={13} className="text-slate-400" />
+          </Link>
+          <button
+            onClick={() => setShowModal(true)}
+            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs shadow-md shadow-indigo-600/20 transition-all cursor-pointer"
+          >
+            <Plus size={16} />
+            <span>Add Department</span>
+          </button>
+        </div>
       </div>
 
       {/* Grid */}
@@ -97,16 +103,18 @@ export default function DepartmentsPage() {
                 </div>
                 <button
                   onClick={() => deleteDepartment(d.id)}
-                  className="p-1.5 text-slate-400 hover:text-rose-500 rounded-lg transition-colors"
+                  className="p-1.5 text-slate-400 hover:text-rose-500 rounded-lg transition-colors cursor-pointer"
                 >
                   <Trash2 size={16} />
                 </button>
               </div>
 
-              <div className="text-xs text-slate-500">
-                <span>Campus / Branch: </span>
-                <span className="font-semibold text-slate-800 dark:text-slate-200">{d.branchName || "Main HQ"}</span>
-              </div>
+              {d.branchName && (
+                <div className="text-xs text-slate-500">
+                  <span>Campus / Branch: </span>
+                  <span className="font-semibold text-slate-800 dark:text-slate-200">{d.branchName}</span>
+                </div>
+              )}
             </div>
           ))
         )}
@@ -119,16 +127,13 @@ export default function DepartmentsPage() {
             <div className="w-full max-w-md my-auto max-h-[85vh] flex flex-col bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200/80 dark:border-slate-800 overflow-hidden animate-in zoom-in-95 duration-200">
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-800 shrink-0">
               <h3 className="text-base font-bold text-slate-900 dark:text-white">Create Department</h3>
-              <button onClick={() => setShowModal(false)} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-lg">✕</button>
+              <button onClick={() => setShowModal(false)} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-lg cursor-pointer">✕</button>
             </div>
 
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                createMutation.mutate({
-                  ...formData,
-                  branchId: formData.branchId ? Number(formData.branchId) : null,
-                });
+                createMutation.mutate(formData);
               }}
               className="flex flex-col flex-1 min-h-0 overflow-hidden"
             >
@@ -138,11 +143,12 @@ export default function DepartmentsPage() {
                   <input
                     type="text"
                     required
-                    placeholder="e.g. IT, HR, ACAD"
+                    placeholder="e.g. IT, HR, ACAD, MKT"
                     value={formData.code}
                     onChange={(e) => setFormData({ ...formData, code: e.target.value })}
                     className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono"
                   />
+                  <p className="text-[10px] text-slate-400 mt-0.5">Short uppercase unique identifier</p>
                 </div>
 
                 <div>
@@ -155,20 +161,6 @@ export default function DepartmentsPage() {
                     onChange={(e) => setFormData({ ...formData, name: e.target.value })}
                     className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   />
-                </div>
-
-                <div>
-                  <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Branch Campus</label>
-                  <select
-                    value={formData.branchId}
-                    onChange={(e) => setFormData({ ...formData, branchId: e.target.value })}
-                    className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  >
-                    <option value="">Main HQ</option>
-                    {branches?.map((b) => (
-                      <option key={b.id} value={b.id}>{b.name}</option>
-                    ))}
-                  </select>
                 </div>
               </div>
 

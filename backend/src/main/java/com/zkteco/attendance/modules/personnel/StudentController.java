@@ -33,8 +33,9 @@ public class StudentController {
             @RequestParam(required = false) String className,
             @RequestParam(required = false) String grade,
             @RequestParam(required = false) String status,
+            @RequestParam(required = false) Long branchId,
             @PageableDefault(size = 15, sort = "id") Pageable pageable) {
-        return ResponseEntity.ok(ApiResponse.ok(studentService.getStudents(search, className, grade, status, pageable)));
+        return ResponseEntity.ok(ApiResponse.ok(studentService.getStudents(search, className, grade, status, branchId, pageable)));
     }
 
     @GetMapping("/next-code")
@@ -42,6 +43,14 @@ public class StudentController {
     @Operation(summary = "Get next unique auto-generated student code")
     public ResponseEntity<ApiResponse<java.util.Map<String, String>>> getNextStudentCode() {
         return ResponseEntity.ok(ApiResponse.ok(java.util.Map.of("nextCode", studentService.getNextStudentCode())));
+    }
+
+    @GetMapping("/next-id-number")
+    @PreAuthorize("hasAuthority('student.read') or hasRole('SUPER_ADMIN') or hasRole('ADMIN') or hasRole('TEACHER')")
+    @Operation(summary = "Get next unique auto-generated student institutional ID (e.g. FBIS260001)")
+    public ResponseEntity<ApiResponse<java.util.Map<String, String>>> getNextStudentIdNumber(@RequestParam(required = false) String year) {
+        String nextId = studentService.getNextStudentIdNumber(year);
+        return ResponseEntity.ok(ApiResponse.ok(java.util.Map.of("nextIdNumber", nextId)));
     }
 
     @GetMapping("/{id}")

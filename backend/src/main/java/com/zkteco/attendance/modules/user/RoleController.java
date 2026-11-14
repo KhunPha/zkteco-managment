@@ -27,16 +27,23 @@ public class RoleController {
     @PreAuthorize("hasAuthority('role.read') or hasRole('SUPER_ADMIN') or hasRole('ADMIN')")
     @Operation(summary = "Get all available system roles")
     public ResponseEntity<ApiResponse<List<RoleDto>>> getRoles() {
-        List<RoleDto> roles = roleRepository.findAll().stream().map(r -> RoleDto.builder()
-                .id(r.getId())
-                .name(r.getName())
-                .description(r.getDescription())
-                .system(r.isSystem())
-                .permissions(r.getPermissions() != null
-                        ? r.getPermissions().stream().map(Permission::getCode).collect(Collectors.toSet())
-                        : null)
-                .build()
-        ).collect(Collectors.toList());
+        org.springframework.security.core.Authentication auth = 
+                org.springframework.security.core.context.SecurityContextHolder.getContext().getAuthentication();
+        boolean isSuperAdmin = auth != null && auth.getAuthorities().stream()
+                .anyMatch(a -> "ROLE_SUPER_ADMIN".equals(a.getAuthority()));
+
+        List<RoleDto> roles = roleRepository.findAll().stream()
+                .filter(r -> isSuperAdmin || !"SUPER_ADMIN".equalsIgnoreCase(r.getName()))
+                .map(r -> RoleDto.builder()
+                        .id(r.getId())
+                        .name(r.getName())
+                        .description(r.getDescription())
+                        .system(r.isSystem())
+                        .permissions(r.getPermissions() != null
+                                ? r.getPermissions().stream().map(Permission::getCode).collect(Collectors.toSet())
+                                : null)
+                        .build()
+                ).collect(Collectors.toList());
 
         return ResponseEntity.ok(ApiResponse.ok(roles));
     }

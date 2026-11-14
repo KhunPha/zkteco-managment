@@ -16,6 +16,8 @@ public class UpdateUserRequest {
     private Boolean active;
     private Boolean locked;
     private String profileImageUrl;
+    private String companyCode;
     private Set<String> roles;
+    private String password;
 }
 

@@ -51,6 +51,10 @@ public class User extends BaseEntity {
     @Column(name = "failed_login_attempts", nullable = false)
     private int failedLoginAttempts = 0;
 
+    @Builder.Default
+    @Column(name = "company_code", nullable = false, length = 50)
+    private String companyCode = "default";
+
     @Column(name = "profile_image_url", columnDefinition = "TEXT")
     private String profileImageUrl;
 

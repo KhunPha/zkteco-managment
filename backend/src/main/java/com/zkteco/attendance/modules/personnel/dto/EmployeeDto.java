@@ -15,6 +15,7 @@ public class EmployeeDto {
     private Long id;
     private Long userId;
     private String employeeCode;
+    private String idNumber;
     private String khmerName;
     private String englishName;
     private String gender;
@@ -35,5 +36,10 @@ public class EmployeeDto {
     private String profileImageUrl;
     private Long supervisorId;
     private String supervisorName;
+    private String companyCode;
+    private String staffType;
+    private Boolean isTeacher;
+    private Boolean scheduleAssigned;
+    private String currentShiftName;
 }
 

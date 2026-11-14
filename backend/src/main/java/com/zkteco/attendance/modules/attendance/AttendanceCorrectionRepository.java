@@ -10,6 +10,9 @@ import java.util.List;
 @Repository
 public interface AttendanceCorrectionRepository extends JpaRepository<AttendanceCorrection, Long> {
     Page<AttendanceCorrection> findByStatusOrderByCreatedAtDesc(String status, Pageable pageable);
+    Page<AttendanceCorrection> findAllByOrderByCreatedAtDesc(Pageable pageable);
+    Page<AttendanceCorrection> findByEmployeeCompanyCodeAndStatusOrderByCreatedAtDesc(String companyCode, String status, Pageable pageable);
+    Page<AttendanceCorrection> findByEmployeeCompanyCodeOrderByCreatedAtDesc(String companyCode, Pageable pageable);
     List<AttendanceCorrection> findByEmployeeIdOrderByCreatedAtDesc(Long employeeId);
 }
 

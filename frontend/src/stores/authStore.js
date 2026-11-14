@@ -16,6 +16,9 @@ export const useAuthStore = create((set) => ({
       localStorage.setItem("access_token", accessToken);
       localStorage.setItem("refresh_token", refreshToken);
       localStorage.setItem("user_data", JSON.stringify(user));
+      if (user?.companyCode) {
+        localStorage.setItem("active_company_code", user.companyCode);
+      }
 
       set({ user, isAuthenticated: true, isLoading: false, error: null });
       return true;
@@ -36,6 +39,7 @@ export const useAuthStore = create((set) => ({
       localStorage.removeItem("access_token");
       localStorage.removeItem("refresh_token");
       localStorage.removeItem("user_data");
+      localStorage.removeItem("active_company_code");
       set({ user: null, isAuthenticated: false });
       if (typeof window !== "undefined") {
         window.location.href = "/login";

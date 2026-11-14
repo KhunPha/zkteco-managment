@@ -12,6 +12,10 @@ public interface DeviceRepository extends JpaRepository<AttendanceDevice, Long>,
     Optional<AttendanceDevice> findBySerialNumber(String serialNumber);
     boolean existsBySerialNumber(String serialNumber);
     List<AttendanceDevice> findAllByActiveTrue();
+    List<AttendanceDevice> findByCompanyCode(String companyCode);
+    List<AttendanceDevice> findByCompanyCodeAndActiveTrue(String companyCode);
     long countByConnectionStatus(String status);
+    long countByCompanyCode(String companyCode);
+    long countByCompanyCodeAndConnectionStatus(String companyCode, String status);
 }
 

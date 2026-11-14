@@ -37,12 +37,15 @@ public class DataImportService {
 
     @Transactional(readOnly = true)
     public DataImportStatusDto getImportStatus() {
-        long totalDevices = deviceRepository.count();
-        long totalEmployees = employeeRepository.count();
-        long totalDeviceUsers = deviceUserRepository.count();
-        long totalRawLogs = rawLogRepository.count();
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        boolean isAll = "all".equalsIgnoreCase(activeTenant);
 
-        List<AttendanceDeviceUser> allUsers = deviceUserRepository.findAll();
+        long totalDevices = isAll ? deviceRepository.count() : deviceRepository.countByCompanyCode(activeTenant);
+        long totalEmployees = isAll ? employeeRepository.count() : employeeRepository.countByCompanyCodeAndDeletedAtIsNull(activeTenant);
+        long totalDeviceUsers = isAll ? deviceUserRepository.count() : deviceUserRepository.countByCompanyCode(activeTenant);
+        long totalRawLogs = isAll ? rawLogRepository.count() : rawLogRepository.countByCompanyCode(activeTenant);
+
+        List<AttendanceDeviceUser> allUsers = isAll ? deviceUserRepository.findAll() : deviceUserRepository.findByCompanyCode(activeTenant);
         long adminCount = allUsers.stream().filter(u -> "ADMIN".equalsIgnoreCase(u.getPrivilege())).count();
         long enrollerCount = allUsers.stream().filter(u -> "ENROLLER".equalsIgnoreCase(u.getPrivilege())).count();
         long normalCount = allUsers.stream().filter(u -> "NORMAL_USER".equalsIgnoreCase(u.getPrivilege())).count();

@@ -10,6 +10,9 @@ import java.util.Optional;
 public interface PositionRepository extends JpaRepository<Position, Long> {
     Optional<Position> findByCode(String code);
     boolean existsByCode(String code);
+    boolean existsByCompanyCodeAndCode(String companyCode, String code);
     List<Position> findAllByActiveTrue();
+    List<Position> findByCompanyCode(String companyCode);
+    List<Position> findByCompanyCodeAndActiveTrue(String companyCode);
 }
 

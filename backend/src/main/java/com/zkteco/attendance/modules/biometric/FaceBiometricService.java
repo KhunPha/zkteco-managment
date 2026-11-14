@@ -50,6 +50,7 @@ public class FaceBiometricService {
     private final StudentRepository studentRepository;
     private final DeviceUserRepository deviceUserRepository;
     private final TelegramNotificationService telegramService;
+    private final org.springframework.context.ApplicationEventPublisher eventPublisher;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Transactional
@@ -313,6 +314,15 @@ public class FaceBiometricService {
         String rawKey = "WEBCAM_" + pin + "_" + bucket + "_" + punchState;
         String idempotencyKey = hashKey(rawKey);
 
+        String companyCode = "default";
+        if (f != null) {
+            if (f.getEmployee() != null && f.getEmployee().getCompanyCode() != null) {
+                companyCode = f.getEmployee().getCompanyCode();
+            } else if (f.getStudent() != null && f.getStudent().getCompanyCode() != null) {
+                companyCode = f.getStudent().getCompanyCode();
+            }
+        }
+
         Long logId = null;
         if (!rawLogRepository.existsByIdempotencyKey(idempotencyKey)) {
             AttendanceRawLog rawLog = AttendanceRawLog.builder()
@@ -323,11 +333,15 @@ public class FaceBiometricService {
                     .verifyType("FACE")
                     .originalPayload("WEBCAM_FACE_ID: pin=" + pin + ", distance=" + request.getDistance())
                     .idempotencyKey(idempotencyKey)
+                    .companyCode(companyCode)
                     .processed(false)
                     .build();
             AttendanceRawLog saved = rawLogRepository.save(rawLog);
             rawLogRepository.flush();
             logId = saved.getId();
+            try {
+                eventPublisher.publishEvent(new com.zkteco.attendance.modules.attendance.event.RawPunchEvent(this, saved));
+            } catch (Exception ignored) {}
 
             // 4 & 5. Asynchronously calculate attendance & dispatch Telegram alert in background (<2ms response)
             final String finalDisplayName = khmerName != null && !khmerName.isBlank() ? khmerName + " (" + personName + ")" : personName;
@@ -425,6 +439,7 @@ public class FaceBiometricService {
 
     private boolean isTeacher(Employee emp) {
         if (emp == null) return false;
+        if (emp.isTeacherPerson()) return true;
         String pos = emp.getPosition() != null ? emp.getPosition().getTitle() : "";
         String dept = emp.getDepartment() != null ? emp.getDepartment().getName() : "";
         String combined = (pos + " " + dept).toLowerCase();

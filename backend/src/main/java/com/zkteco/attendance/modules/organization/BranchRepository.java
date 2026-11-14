@@ -11,5 +11,8 @@ public interface BranchRepository extends JpaRepository<Branch, Long> {
     Optional<Branch> findByCode(String code);
     boolean existsByCode(String code);
     List<Branch> findAllByActiveTrue();
+    List<Branch> findByCompanyCode(String companyCode);
+    List<Branch> findByCompanyCodeAndActiveTrue(String companyCode);
+    boolean existsByCompanyCodeAndCode(String companyCode, String code);
 }
 

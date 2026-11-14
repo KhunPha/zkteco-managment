@@ -19,6 +19,9 @@ import {
   UserCheck,
   ArrowUpDown,
   Filter,
+  Building2,
+  Activity,
+  GitFork,
 } from "lucide-react";
 import api from "@/lib/api";
 import { formatTime, formatDate } from "@/lib/utils";
@@ -28,6 +31,7 @@ export default function DailyAttendancePage() {
   const queryClient = useQueryClient();
   const [date, setDate] = useState(new Date().toISOString().split("T")[0]);
   const [departmentId, setDepartmentId] = useState("");
+  const [branchId, setBranchId] = useState("");
   const [status, setStatus] = useState("");
   const [search, setSearch] = useState("");
   const [personnelType, setPersonnelType] = useState("ALL"); // ALL, TEACHER, EMPLOYEE, STUDENT
@@ -44,13 +48,22 @@ export default function DailyAttendancePage() {
     },
   });
 
+  const { data: branches = [] } = useQuery({
+    queryKey: ["all-branches"],
+    queryFn: async () => {
+      const res = await api.get("/api/v1/branches");
+      return res.data?.data || [];
+    },
+  });
+
   const isToday = date === new Date().toISOString().split("T")[0];
 
   const { data: attendanceData, isLoading, refetch } = useQuery({
-    queryKey: ["attendance-records", date, departmentId, status, search, personnelType, orderBy, page, pageSize],
+    queryKey: ["attendance-records", date, departmentId, branchId, status, search, personnelType, orderBy, page, pageSize],
     queryFn: async () => {
       let url = `/api/v1/attendance?date=${date}&page=${page}&size=${pageSize}`;
       if (departmentId) url += `&departmentId=${departmentId}`;
+      if (branchId) url += `&branchId=${branchId}`;
       if (status) url += `&status=${status}`;
       if (search) url += `&search=${encodeURIComponent(search)}`;
       if (personnelType && personnelType !== "ALL") url += `&personnelType=${personnelType}`;
@@ -58,9 +71,9 @@ export default function DailyAttendancePage() {
       const res = await api.get(url);
       return res.data?.data;
     },
-    refetchInterval: isToday ? 300 : false, // Ultra-fast 300ms live stream for today
-    staleTime: 0,
-    refetchIntervalInBackground: true,
+    refetchInterval: isToday ? 5000 : false, // Poll every 5s for today's active scans
+    staleTime: 3000,
+    refetchIntervalInBackground: false,
   });
 
   const processMutation = useMutation({
@@ -189,10 +202,10 @@ export default function DailyAttendancePage() {
       </div>
 
       {/* Date & Filter Strip */}
-      <div className="flex flex-wrap items-center justify-between gap-3 sm:gap-4 p-3.5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800/80 shadow-xs">
-        <div className="flex flex-wrap items-center gap-2.5 sm:gap-3 flex-1">
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
-            <Calendar size={16} className="text-slate-400" />
+      <div className="p-3.5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800/80 shadow-xs">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <div className="h-10 flex-1 min-w-[150px] flex items-center gap-2 px-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus-within:ring-2 focus-within:ring-indigo-500/30 focus-within:border-indigo-500 transition-all">
+            <Calendar size={15} className="text-slate-400 shrink-0 pointer-events-none" />
             <input
               type="date"
               value={date}
@@ -200,12 +213,12 @@ export default function DailyAttendancePage() {
                 setDate(e.target.value);
                 setPage(0);
               }}
-              className="bg-transparent border-none text-xs text-slate-900 dark:text-white focus:outline-none font-semibold cursor-pointer"
+              className="bg-transparent border-none text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-0 font-semibold cursor-pointer w-full p-0 leading-normal"
             />
           </div>
 
-          <div className="relative min-w-[180px] flex-1 sm:flex-initial">
-            <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <div className="h-10 flex-1 min-w-[180px] flex items-center gap-2.5 px-3.5 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus-within:ring-2 focus-within:ring-indigo-500/30 focus-within:border-indigo-500 dark:focus-within:border-indigo-400 transition-all">
+            <Search size={16} className="text-slate-400 dark:text-slate-500 shrink-0 pointer-events-none select-none" />
             <input
               type="text"
               placeholder="Search code or name..."
@@ -214,71 +227,103 @@ export default function DailyAttendancePage() {
                 setSearch(e.target.value);
                 setPage(0);
               }}
-              className="w-full pl-8 pr-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              className="w-full bg-transparent border-none text-xs text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:ring-0 font-medium p-0 leading-normal"
             />
           </div>
 
-          {personnelType !== "STUDENT" && (
-            <select
-              value={departmentId}
-              onChange={(e) => {
-                setDepartmentId(e.target.value);
-                setPage(0);
-              }}
-              className="px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer"
-            >
-              <option value="" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">All Departments</option>
-              {departments?.map((d) => (
-                <option key={d.id} value={d.id} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">{d.name}</option>
-              ))}
-            </select>
+          {personnelType !== "STUDENT" ? (
+            <div className="h-10 flex-1 min-w-[150px] flex items-center gap-2 px-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus-within:ring-2 focus-within:ring-indigo-500/30 focus-within:border-indigo-500 transition-all">
+              <Building2 size={15} className="text-slate-400 shrink-0 pointer-events-none" />
+              <select
+                value={departmentId}
+                onChange={(e) => {
+                  setDepartmentId(e.target.value);
+                  setPage(0);
+                }}
+                className="bg-transparent border-none text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-0 font-semibold cursor-pointer w-full p-0 leading-normal"
+              >
+                <option value="" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">All Departments</option>
+                {departments?.map((d) => (
+                  <option key={d.id} value={d.id} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">{d.name}</option>
+                ))}
+              </select>
+            </div>
+          ) : (
+            <div className="h-10 flex-1 min-w-[150px] flex items-center gap-2 px-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-400 text-xs font-medium">
+              <Building2 size={15} className="text-slate-400 shrink-0 pointer-events-none" />
+              <span>All Academic Classes</span>
+            </div>
           )}
 
-          <select
-            value={status}
-            onChange={(e) => {
-              setStatus(e.target.value);
-              setPage(0);
-            }}
-            className="px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer"
-          >
-            <option value="" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">All Statuses</option>
-            <option value="PRESENT" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Present</option>
-            <option value="LATE" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Late Arrival</option>
-            <option value="EARLY_DEPARTURE" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Early Departure</option>
-            <option value="ABSENT" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Absent</option>
-            <option value="ON_LEAVE" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">On Leave</option>
-            <option value="REST_DAY" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Rest Day</option>
-          </select>
+          <div className="h-10 flex-1 min-w-[140px] flex items-center gap-2 px-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus-within:ring-2 focus-within:ring-indigo-500/30 focus-within:border-indigo-500 transition-all">
+            <Activity size={15} className="text-slate-400 shrink-0 pointer-events-none" />
+            <select
+              value={status}
+              onChange={(e) => {
+                setStatus(e.target.value);
+                setPage(0);
+              }}
+              className="bg-transparent border-none text-xs text-slate-900 dark:text-white focus:outline-none font-semibold cursor-pointer w-full p-0"
+            >
+              <option value="" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">All Statuses</option>
+              <option value="PRESENT" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">✓ Present</option>
+              <option value="LATE" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">⚠ Late Arrival</option>
+              <option value="EARLY_DEPARTURE" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">⏱ Early Departure</option>
+              <option value="ABSENT" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">✕ Absent</option>
+              <option value="ON_LEAVE" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">★ On Leave</option>
+              <option value="REST_DAY" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Rest Day</option>
+            </select>
+          </div>
+
+          <div className="h-10 flex-1 min-w-[160px] flex items-center gap-2 px-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus-within:ring-2 focus-within:ring-indigo-500/30 focus-within:border-indigo-500 transition-all">
+            <GitFork size={15} className="text-slate-400 shrink-0 pointer-events-none" />
+            <select
+              value={branchId}
+              onChange={(e) => {
+                setBranchId(e.target.value);
+                setPage(0);
+              }}
+              className="bg-transparent border-none text-xs text-slate-900 dark:text-white focus:outline-none font-semibold cursor-pointer w-full p-0"
+            >
+              <option value="" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">All Branches (គ្រប់សាខា)</option>
+              {branches?.map((b) => (
+                <option key={b.id} value={b.id} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">
+                  📍 {b.name} ({b.code})
+                </option>
+              ))}
+            </select>
+          </div>
 
           {/* Order By Selector */}
-          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
-            <ArrowUpDown size={14} className="text-slate-400" />
+          <div className="h-10 flex-1 min-w-[150px] flex items-center gap-1.5 px-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus-within:ring-2 focus-within:ring-indigo-500/30 focus-within:border-indigo-500 transition-all">
+            <ArrowUpDown size={14} className="text-slate-400 shrink-0" />
             <select
               value={orderBy}
               onChange={(e) => {
                 setOrderBy(e.target.value);
                 setPage(0);
               }}
-              className="bg-transparent border-none text-xs text-slate-900 dark:text-white focus:outline-none font-semibold cursor-pointer"
+              className="bg-transparent border-none text-xs text-slate-900 dark:text-white focus:outline-none font-semibold cursor-pointer w-full p-0"
             >
-              <option value="ROLE_TEACHER_FIRST" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Order: Teachers First</option>
-              <option value="ROLE_STUDENT_FIRST" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Order: Students First</option>
-              <option value="ROLE_EMPLOYEE_FIRST" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Order: Staff First</option>
-              <option value="TIME_DESC" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Order: Latest Punch First</option>
-              <option value="TIME_ASC" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Order: Earliest Punch First</option>
-              <option value="NAME_ASC" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Order: Name (A - Z)</option>
+              <option value="ROLE_TEACHER_FIRST" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Teachers First</option>
+              <option value="ROLE_STUDENT_FIRST" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Students First</option>
+              <option value="ROLE_EMPLOYEE_FIRST" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Staff First</option>
+              <option value="TIME_DESC" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Latest Punch First</option>
+              <option value="TIME_ASC" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Earliest Punch First</option>
+              <option value="NAME_ASC" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Name (A - Z)</option>
             </select>
           </div>
-        </div>
 
-        <button
-          onClick={() => refetch()}
-          className="p-2 rounded-xl text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer hover:scale-110 active:scale-95 transition-all"
-          title="Refresh"
-        >
-          <RefreshCw size={16} />
-        </button>
+          {/* Refresh Action Button */}
+          <button
+            type="button"
+            onClick={() => refetch()}
+            className="h-10 w-10 shrink-0 flex items-center justify-center rounded-xl text-slate-600 dark:text-slate-300 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 font-semibold transition-all cursor-pointer hover:shadow-xs active:scale-95"
+            title="Refresh Attendance Data"
+          >
+            <RefreshCw size={15} />
+          </button>
+        </div>
       </div>
 
       {/* Mini Stat Counters */}
@@ -303,12 +348,15 @@ export default function DailyAttendancePage() {
 
       {/* Attendance Table */}
       <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200/80 dark:border-slate-800/80 overflow-hidden shadow-xs">
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto max-h-[680px]">
           <table className="w-full text-left border-collapse text-xs">
-            <thead>
-              <tr className="border-b border-slate-200/80 dark:border-slate-800 bg-slate-50/90 dark:bg-slate-800/60 text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wider text-[11px]">
+            <thead className="sticky top-0 bg-slate-50 dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wider text-[11px] z-10 backdrop-blur-md">
+              <tr className="border-b border-slate-200/80 dark:border-slate-800 bg-slate-50 dark:bg-slate-900">
                 <th rowSpan={2} className="py-3.5 px-4 text-left border-r border-slate-200/60 dark:border-slate-800 min-w-[220px]">
                   Personnel & Role
+                </th>
+                <th rowSpan={2} className="py-3.5 px-3.5 text-left border-r border-slate-200/60 dark:border-slate-800 min-w-[130px]">
+                  Branch (សាខា)
                 </th>
                 <th rowSpan={2} className="py-3.5 px-3.5 text-left border-r border-slate-200/60 dark:border-slate-800 min-w-[150px]">
                   Shift
@@ -323,10 +371,13 @@ export default function DailyAttendancePage() {
                     <span>🌆 Shift 2 (Afternoon)</span>
                   </div>
                 </th>
-                <th rowSpan={2} className="py-3.5 px-3 text-center border-r border-slate-200/60 dark:border-slate-800 min-w-[105px] whitespace-nowrap">
-                  Late
+                <th rowSpan={2} className="py-3.5 px-3 text-center border-r border-slate-200/60 dark:border-slate-800 min-w-[95px] whitespace-nowrap">
+                  Late (យឺត)
                 </th>
-                <th rowSpan={2} className="py-3.5 px-3 text-center border-r border-slate-200/60 dark:border-slate-800 min-w-[105px]">
+                <th rowSpan={2} className="py-3.5 px-3 text-center border-r border-slate-200/60 dark:border-slate-800 min-w-[95px] whitespace-nowrap">
+                  Early Leave (ចេញមុន)
+                </th>
+                <th rowSpan={2} className="py-3.5 px-3 text-center border-r border-slate-200/60 dark:border-slate-800 min-w-[100px]">
                   Total Work
                 </th>
                 <th rowSpan={2} className="py-3.5 px-3 text-center border-r border-slate-200/60 dark:border-slate-800 min-w-[90px]">
@@ -354,11 +405,11 @@ export default function DailyAttendancePage() {
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
               {isLoading ? (
                 <tr>
-                  <td colSpan={10} className="py-8 text-center text-slate-400">Loading daily attendance records...</td>
+                  <td colSpan={12} className="py-8 text-center text-slate-400">Loading daily attendance records...</td>
                 </tr>
               ) : records.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="py-12 text-center text-slate-400">
+                  <td colSpan={12} className="py-12 text-center text-slate-400">
                     <CalendarCheck size={32} className="mx-auto mb-2 opacity-50" />
                     <p className="font-semibold">No attendance records for {date}</p>
                     <p className="text-[11px]">Click "Recalculate Day" to compute records from raw terminal logs.</p>
@@ -372,7 +423,7 @@ export default function DailyAttendancePage() {
                   const s1In = r.shift1CheckIn || r.firstCheckIn;
                   const s1Out = r.shift1CheckOut;
                   const s2In = r.shift2CheckIn;
-                  const s2Out = r.shift2CheckOut || (r.lastCheckOut && r.lastCheckOut !== r.shift1CheckOut ? r.lastCheckOut : null);
+                  const s2Out = r.shift2CheckOut || (!r.shift2CheckIn && r.lastCheckOut && r.lastCheckOut !== r.shift1CheckOut ? r.lastCheckOut : null);
 
                   return (
                     <tr key={r.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-colors">
@@ -428,6 +479,14 @@ export default function DailyAttendancePage() {
                         </div>
                       </td>
 
+                      {/* BRANCH */}
+                      <td className="py-3 px-3.5 border-r border-slate-100 dark:border-slate-800">
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800/60 whitespace-nowrap">
+                          <GitFork size={12} className="text-indigo-500 shrink-0" />
+                          <span>{r.branchName || "Branch 1"}</span>
+                        </span>
+                      </td>
+
                       {/* SHIFT */}
                       <td className="py-3 px-3.5 border-r border-slate-100 dark:border-slate-800">
                         <div className="space-y-0.5">
@@ -448,9 +507,15 @@ export default function DailyAttendancePage() {
                             <span className="font-mono font-bold text-xs text-slate-900 dark:text-white tracking-wider">
                               {formatTime(s1In)}
                             </span>
-                            <span className="text-[10px] text-slate-400 dark:text-slate-500 font-medium truncate max-w-[95px] mt-0.5" title={r.inDeviceName || "Terminal In"}>
-                              {r.inDeviceName ? r.inDeviceName.split(" ")[0] : "Gate In"}
-                            </span>
+                            {r.shift1LateMinutes > 0 ? (
+                              <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 font-semibold mt-0.5 border border-amber-300/50">
+                                ⚠️ យឺត +{r.shift1LateMinutes}m
+                              </span>
+                            ) : (
+                              <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-100/70 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 font-semibold mt-0.5">
+                                ✓ On Time
+                              </span>
+                            )}
                           </div>
                         ) : (
                           <div className="flex flex-col items-center justify-center">
@@ -467,9 +532,15 @@ export default function DailyAttendancePage() {
                             <span className="font-mono font-bold text-xs text-amber-600 dark:text-amber-400 tracking-wider">
                               {formatTime(s1Out)}
                             </span>
-                            <span className="text-[9px] px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 font-semibold mt-0.5">
-                              Lunch Out
-                            </span>
+                            {r.shift1EarlyMinutes > 0 ? (
+                              <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-rose-100 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 font-semibold mt-0.5 border border-rose-300/50">
+                                ⚠️ ចេញមុន -{r.shift1EarlyMinutes}m
+                              </span>
+                            ) : (
+                              <span className="text-[9px] px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 font-semibold mt-0.5">
+                                Lunch Out
+                              </span>
+                            )}
                           </div>
                         ) : (
                           <div className="flex flex-col items-center justify-center">
@@ -486,9 +557,15 @@ export default function DailyAttendancePage() {
                             <span className="font-mono font-bold text-xs text-indigo-600 dark:text-indigo-400 tracking-wider">
                               {formatTime(s2In)}
                             </span>
-                            <span className="text-[9px] px-2 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 font-semibold mt-0.5">
-                              Resume In
-                            </span>
+                            {r.shift2LateMinutes > 0 ? (
+                              <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 font-semibold mt-0.5 border border-amber-300/50">
+                                ⚠️ យឺត +{r.shift2LateMinutes}m
+                              </span>
+                            ) : (
+                              <span className="text-[9px] px-2 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 font-semibold mt-0.5">
+                                Resume In
+                              </span>
+                            )}
                           </div>
                         ) : (
                           <div className="flex flex-col items-center justify-center">
@@ -505,9 +582,19 @@ export default function DailyAttendancePage() {
                             <span className="font-mono font-bold text-xs text-slate-900 dark:text-white tracking-wider">
                               {formatTime(s2Out)}
                             </span>
-                            <span className="text-[10px] text-slate-400 dark:text-slate-500 font-medium truncate max-w-[95px] mt-0.5" title={r.outDeviceName || "Terminal Out"}>
-                              {r.outDeviceName ? r.outDeviceName.split(" ")[0] : "Gate Out"}
-                            </span>
+                            {r.shift2EarlyMinutes > 0 ? (
+                              <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-rose-100 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 font-semibold mt-0.5 border border-rose-300/50">
+                                ⚠️ ចេញមុន -{r.shift2EarlyMinutes}m
+                              </span>
+                            ) : r.overtimeMinutes > 0 ? (
+                              <span className="text-[9px] px-2 py-0.5 rounded-full bg-purple-100 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300 font-semibold mt-0.5">
+                                ⏳ +{r.overtimeMinutes}m
+                              </span>
+                            ) : (
+                              <span className="text-[9px] px-2 py-0.5 rounded-full bg-emerald-100/70 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 font-semibold mt-0.5">
+                                Shift Out
+                              </span>
+                            )}
                           </div>
                         ) : (
                           <div className="flex flex-col items-center justify-center">
@@ -518,7 +605,7 @@ export default function DailyAttendancePage() {
                       </td>
 
                       {/* LATE */}
-                      <td className="py-3 px-3 text-center border-r border-slate-100 dark:border-slate-800 whitespace-nowrap min-w-[105px]">
+                      <td className="py-3 px-3 text-center border-r border-slate-100 dark:border-slate-800 whitespace-nowrap min-w-[95px]">
                         {r.lateMinutes > 0 ? (
                           <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-500/10 text-amber-600 dark:text-amber-400 font-mono font-bold border border-amber-500/20 whitespace-nowrap text-xs">
                             <Clock size={11} className="shrink-0" />
@@ -529,6 +616,18 @@ export default function DailyAttendancePage() {
                             <CheckCircle size={12} className="shrink-0" />
                             On Time
                           </span>
+                        )}
+                      </td>
+
+                      {/* EARLY LEAVE */}
+                      <td className="py-3 px-3 text-center border-r border-slate-100 dark:border-slate-800 whitespace-nowrap min-w-[95px]">
+                        {r.earlyLeaveMinutes > 0 ? (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-rose-500/10 text-rose-600 dark:text-rose-400 font-mono font-bold border border-rose-500/20 whitespace-nowrap text-xs">
+                            <Clock size={11} className="shrink-0" />
+                            -{r.earlyLeaveMinutes}m
+                          </span>
+                        ) : (
+                          <span className="text-slate-400 dark:text-slate-600 font-mono text-xs">-</span>
                         )}
                       </td>
 

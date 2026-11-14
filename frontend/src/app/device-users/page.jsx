@@ -48,7 +48,7 @@ import WebcamFaceEnrollModal from "@/components/biometrics/WebcamFaceEnrollModal
 const ACADEMIC_YEARS = ["2026-2027", "2025-2026", "2024-2025", "2023-2024"];
 const STUDENT_GRADES = ["Grade 12", "Grade 11", "Grade 10", "Grade 9", "Grade 8", "Grade 7"];
 
-// Smart RFID Card number parser: supports decimal, Wiegand (e.g. 197, 27883), and Hex
+// Real RFID Card number parser: preserves the exact, authentic input number from user without adding any extra digits/zeros
 function parseRfidCardInput(raw) {
   if (!raw) return "";
   const trimmed = String(raw).trim();
@@ -57,18 +57,17 @@ function parseRfidCardInput(raw) {
   if (wiegandMatch) {
     const fac = parseInt(wiegandMatch[1], 10);
     const card = parseInt(wiegandMatch[2], 10);
-    const combined = (fac * 65536) + card;
-    return String(combined).padStart(10, "0");
+    return String((fac * 65536) + card);
   }
-  // Hex format: "0xC56CEB" or "C56CEB"
-  if (/^(0x)?[0-9a-fA-F]{6,8}$/.test(trimmed) && !/^\d+$/.test(trimmed)) {
+  // Hex format with prefix: "0xC56CEB"
+  if (/^0x[0-9a-fA-F]{6,8}$/i.test(trimmed)) {
     const hex = trimmed.replace(/^0x/i, "");
     const dec = parseInt(hex, 16);
-    if (!isNaN(dec)) return String(dec).padStart(10, "0");
+    if (!isNaN(dec)) return String(dec);
   }
-  // Standard decimal digits (strip any non-numeric noise)
-  const digits = trimmed.replace(/\D/g, "");
-  return digits ? digits.padStart(10, "0") : "";
+  // Return the real input number entered by the user (no auto padding of zeros)
+  const clean = trimmed.replace(/\s+/g, "");
+  return clean;
 }
 
 // POS confirmation beep via Web Audio API
@@ -121,6 +120,7 @@ export default function DeviceUsersPage() {
   const [showSyncModal, setShowSyncModal] = useState(false);
   const [selectedUser, setSelectedUser] = useState(null);
   const [actionFeedback, setActionFeedback] = useState(null);
+  const [activeAddDevicePin, setActiveAddDevicePin] = useState(null);
 
   // Fast single-user card scan state
   const [quickScanUser, setQuickScanUser] = useState(null);
@@ -175,6 +175,44 @@ export default function DeviceUsersPage() {
     password: "",
   });
   const [personnelSearch, setPersonnelSearch] = useState("");
+  const [loadingNextPin, setLoadingNextPin] = useState(false);
+
+  const fetchNextDevicePin = async () => {
+    setLoadingNextPin(true);
+    try {
+      const res = await api.get("/api/v1/device-users/next-pin");
+      if (res.data?.data?.nextPin) {
+        setCreateForm((prev) => ({ ...prev, devicePin: res.data.data.nextPin }));
+      }
+    } catch (err) {
+      console.warn("Failed to fetch next device PIN", err);
+    } finally {
+      setLoadingNextPin(false);
+    }
+  };
+
+  const handleOpenCreateModal = async () => {
+    setPersonnelSearch("");
+    const defaultDev = devices?.[0]?.id ? String(devices[0].id) : "";
+    const firstEmp = employees?.[0];
+    setCreateForm({
+      deviceId: defaultDev,
+      devicePin: firstEmp?.employeeCode || "",
+      nameOnDevice: firstEmp?.englishName || firstEmp?.khmerName || "",
+      privilege: "NORMAL_USER",
+      personnelType: "EMPLOYEE",
+      employeeId: firstEmp?.id ? String(firstEmp.id) : "",
+      studentId: "",
+      faceEnrolled: false,
+      fingerprintCount: 0,
+      cardNumber: "",
+      password: "",
+    });
+    setShowCreateModal(true);
+    if (!firstEmp?.employeeCode) {
+      await fetchNextDevicePin();
+    }
+  };
 
   // Edit Biometrics state
   const [biometricsForm, setBiometricsForm] = useState({
@@ -192,11 +230,13 @@ export default function DeviceUsersPage() {
 
   // Remote Machine Fingerprint Enrollment & Cross-Terminal Sync
   const [isSyncingAllFp, setIsSyncingAllFp] = useState(false);
-  const [enrollTargetGate, setEnrollTargetGate] = useState("203.147.129.237:4370");
+  const [enrollTargetGate, setEnrollTargetGate] = useState("192.168.1.202:4370");
   const [enrollFingerIndex, setEnrollFingerIndex] = useState(0);
   const [isEnrollingFp, setIsEnrollingFp] = useState(false);
   const [enrollFeedback, setEnrollFeedback] = useState(null);
   const [fpEnrollUser, setFpEnrollUser] = useState(null);
+  const [enrollStep, setEnrollStep] = useState(0); // 0=idle, 1=touch 1, 2=touch 2, 3=touch 3, 4=complete
+  const enrollTimersRef = useRef([]);
 
   // Multi-terminal sync state
   const [syncForm, setSyncForm] = useState({
@@ -353,36 +393,105 @@ export default function DeviceUsersPage() {
     const rawList = usersData?.content || [];
     if (selectedDeviceId) {
       // If user filtered by a specific device, show only that device's rows
-      return rawList.map((u) => ({
-        ...u,
-        deviceIds: [u.deviceId],
-        deviceNames: [u.deviceName],
-        deviceUserIds: [u.id],
-      }));
+      return rawList.map((u) => {
+        const synced = (u.syncedDevices && u.syncedDevices.length > 0)
+          ? u.syncedDevices
+          : (u.deviceId ? [{
+              deviceId: u.deviceId,
+              deviceName: u.deviceName,
+              deviceSerialNumber: u.deviceSerialNumber,
+              ipAddress: u.ipAddress,
+              port: u.port,
+              deviceUserId: u.id,
+              syncStatus: u.syncStatus,
+            }] : []);
+        return {
+          ...u,
+          deviceIds: u.deviceIds || [u.deviceId],
+          deviceNames: u.deviceNames || [u.deviceName],
+          deviceUserIds: u.allDeviceUserIds || [u.id],
+          syncedDevices: synced,
+          deviceCount: synced.length,
+        };
+      });
     }
+
     const map = new Map();
     for (const u of rawList) {
-      const key = u.devicePin || `id-${u.id}`;
+      const pinStr = u.devicePin ? String(u.devicePin).trim() : "";
+      const key = pinStr ? `pin-${pinStr}` : `id-${u.id}`;
+
+      const userSynced = (u.syncedDevices && u.syncedDevices.length > 0)
+        ? [...u.syncedDevices]
+        : (u.deviceId ? [{
+            deviceId: u.deviceId,
+            deviceName: u.deviceName,
+            deviceSerialNumber: u.deviceSerialNumber,
+            ipAddress: u.ipAddress,
+            port: u.port,
+            deviceUserId: u.id,
+            syncStatus: u.syncStatus,
+          }] : []);
+
       if (!map.has(key)) {
         map.set(key, {
           ...u,
-          deviceIds: [u.deviceId],
-          deviceNames: [u.deviceName],
-          deviceUserIds: [u.id],
+          deviceIds: u.deviceIds ? [...u.deviceIds] : (u.deviceId ? [u.deviceId] : []),
+          deviceNames: u.deviceNames ? [...u.deviceNames] : (u.deviceName ? [u.deviceName] : []),
+          deviceUserIds: u.allDeviceUserIds ? [...u.allDeviceUserIds] : (u.id ? [u.id] : []),
+          syncedDevices: userSynced,
+          deviceCount: userSynced.length,
         });
       } else {
         const existing = map.get(key);
-        if (!existing.deviceIds.includes(u.deviceId)) {
-          existing.deviceIds.push(u.deviceId);
-          existing.deviceNames.push(u.deviceName);
+
+        // Merge device user IDs
+        if (u.id && !existing.deviceUserIds.includes(u.id)) {
           existing.deviceUserIds.push(u.id);
         }
+        if (u.allDeviceUserIds) {
+          for (const uid of u.allDeviceUserIds) {
+            if (!existing.deviceUserIds.includes(uid)) existing.deviceUserIds.push(uid);
+          }
+        }
+
+        // Merge device IDs & names
+        if (u.deviceId && !existing.deviceIds.includes(u.deviceId)) {
+          existing.deviceIds.push(u.deviceId);
+          existing.deviceNames.push(u.deviceName || "Terminal");
+        }
+        if (u.deviceIds) {
+          for (let i = 0; i < u.deviceIds.length; i++) {
+            const did = u.deviceIds[i];
+            if (!existing.deviceIds.includes(did)) {
+              existing.deviceIds.push(did);
+              if (u.deviceNames && u.deviceNames[i]) existing.deviceNames.push(u.deviceNames[i]);
+            }
+          }
+        }
+
+        // Merge syncedDevices
+        for (const sd of userSynced) {
+          if (!existing.syncedDevices.some((d) => d.deviceId === sd.deviceId)) {
+            existing.syncedDevices.push(sd);
+          }
+        }
+        existing.deviceCount = existing.syncedDevices.length;
+
+        // Biometrics and Personnel merge
         if (!existing.cardNumber && u.cardNumber) existing.cardNumber = u.cardNumber;
         if (u.faceEnrolled) existing.faceEnrolled = true;
         if (u.fingerprintCount > existing.fingerprintCount) existing.fingerprintCount = u.fingerprintCount;
         if (!existing.employeeId && u.employeeId) existing.employeeId = u.employeeId;
         if (!existing.employeeName && u.employeeName) existing.employeeName = u.employeeName;
+        if (!existing.studentId && u.studentId) existing.studentId = u.studentId;
+        if (!existing.studentName && u.studentName) existing.studentName = u.studentName;
         if (!existing.nameOnDevice && u.nameOnDevice) existing.nameOnDevice = u.nameOnDevice;
+        if (!existing.personnelType && u.personnelType) existing.personnelType = u.personnelType;
+        if (!existing.departmentName && u.departmentName) existing.departmentName = u.departmentName;
+        if (!existing.positionTitle && u.positionTitle) existing.positionTitle = u.positionTitle;
+        if (!existing.studentGrade && u.studentGrade) existing.studentGrade = u.studentGrade;
+        if (!existing.studentClassName && u.studentClassName) existing.studentClassName = u.studentClassName;
       }
     }
     return Array.from(map.values());
@@ -432,17 +541,79 @@ export default function DeviceUsersPage() {
   };
 
   const deleteUser = async (u) => {
-    const ids = u.deviceUserIds || [u.id];
-    const msg = ids.length > 1
-      ? `Remove user PIN ${u.devicePin} (${u.nameOnDevice}) from all ${ids.length} terminals?`
-      : `Remove user PIN ${u.devicePin} (${u.nameOnDevice}) from terminal?`;
-    if (!confirm(msg)) return;
+    if (!u) return;
+    const userObj = typeof u === "object" ? u : { id: u };
+    const ids = Array.isArray(userObj.allDeviceUserIds) && userObj.allDeviceUserIds.length > 0
+      ? userObj.allDeviceUserIds
+      : (Array.isArray(userObj.deviceUserIds) && userObj.deviceUserIds.length > 0
+        ? userObj.deviceUserIds
+        : (userObj.id ? [userObj.id] : []));
+    const pin = userObj.devicePin || userObj.employeeCode || userObj.studentCode || (typeof u === "string" || typeof u === "number" ? String(u) : "");
+    const name = userObj.nameOnDevice || userObj.employeeName || userObj.studentName || (pin ? `PIN ${pin}` : "User");
+
+    const msg = `Remove user ${name} (PIN ${pin}) from database and clean from all physical biometric machines?`;
+
+    if (!window.confirm(msg)) return;
+
     try {
-      await Promise.all(ids.map((targetId) => api.delete(`/api/v1/device-users/${targetId}`)));
+      if (pin) {
+        await api.delete(`/api/v1/device-users/by-pin/${encodeURIComponent(pin)}`);
+      } else if (ids.length > 0) {
+        await Promise.all(ids.map((targetId) => api.delete(`/api/v1/device-users/${targetId}`)));
+      }
       queryClient.invalidateQueries(["device-users"]);
-      showFeedback("User mapping removed from all terminals", "success");
+      queryClient.invalidateQueries(["batch-roster-users"]);
+      queryClient.invalidateQueries(["employees"]);
+      queryClient.invalidateQueries(["students"]);
+      queryClient.invalidateQueries(["teachers"]);
+      queryClient.invalidateQueries(["all-schedules"]);
+      queryClient.invalidateQueries(["unassigned-summary"]);
+      showFeedback(`User ${name} (PIN ${pin}) removed from database & cleaned from machines`, "success");
     } catch (err) {
-      alert("Error: " + err.message);
+      alert("Error: " + (err.response?.data?.message || err.message));
+    }
+  };
+
+  const handleRemoveDeviceFromUser = async (u, d) => {
+    if (!u || !d) return;
+    const pin = u.devicePin;
+    const userName = u.nameOnDevice || u.employeeName || u.studentName || `PIN ${pin}`;
+    const devName = d.deviceName || "Terminal";
+    const devId = d.deviceId;
+    const devUserId = d.deviceUserId;
+
+    if (!window.confirm(`Remove ${userName} (PIN ${pin}) from ${devName}?\n\nThis will remove the user from this hardware terminal while keeping their enrollment on all other terminals.`)) {
+      return;
+    }
+
+    try {
+      if (devId && pin) {
+        await api.delete(`/api/v1/device-users/device/${devId}/pin/${encodeURIComponent(pin)}`);
+      } else if (devUserId) {
+        await api.delete(`/api/v1/device-users/${devUserId}`);
+      }
+      queryClient.invalidateQueries(["device-users"]);
+      queryClient.invalidateQueries(["batch-roster-users"]);
+      showFeedback(`✓ Removed ${userName} from ${devName} (Cleaned from machine)`, "success");
+    } catch (err) {
+      alert("Error removing from terminal: " + (err.response?.data?.message || err.message));
+    }
+  };
+
+  const handleAddDeviceToUser = async (u, devId) => {
+    if (!u || !devId) return;
+    const pin = u.devicePin;
+    const userName = u.nameOnDevice || u.employeeName || u.studentName || `PIN ${pin}`;
+    const targetDev = devices?.find((d) => d.id === devId);
+    const devName = targetDev?.name || "Terminal";
+
+    try {
+      await api.post(`/api/v1/device-users/device/${devId}/pin/${encodeURIComponent(pin)}`);
+      queryClient.invalidateQueries(["device-users"]);
+      queryClient.invalidateQueries(["batch-roster-users"]);
+      showFeedback(`✓ Synced ${userName} to ${devName}`, "success");
+    } catch (err) {
+      alert("Error assigning to terminal: " + (err.response?.data?.message || err.message));
     }
   };
 
@@ -450,7 +621,7 @@ export default function DeviceUsersPage() {
     setSelectedUser(u);
     setBiometricsForm({
       id: u.id,
-      allDeviceUserIds: u.deviceUserIds || [u.id],
+      allDeviceUserIds: u.allDeviceUserIds || u.deviceUserIds || [u.id],
       deviceId: u.deviceId,
       devicePin: u.devicePin,
       nameOnDevice: u.nameOnDevice || "",
@@ -693,6 +864,29 @@ export default function DeviceUsersPage() {
     }
   };
 
+  const clearEnrollTimers = () => {
+    enrollTimersRef.current.forEach((t) => clearTimeout(t));
+    enrollTimersRef.current = [];
+  };
+
+  const playTouchBeep = (step) => {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const now = ctx.currentTime;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = "sine";
+      const freq = step === 1 ? 784 : step === 2 ? 880 : 1046.5;
+      osc.frequency.setValueAtTime(freq, now);
+      gain.gain.setValueAtTime(0.2, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+      osc.start(now);
+      osc.stop(now + 0.15);
+    } catch (_) {}
+  };
+
   const playSuccessChime = () => {
     try {
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -719,7 +913,10 @@ export default function DeviceUsersPage() {
 
   const handleRemoteEnrollFingerprint = async (pinOverride = null, ipOverride = null, fidOverride = null) => {
     const targetPin = pinOverride || biometricsForm.devicePin || fpEnrollUser?.devicePin;
-    const targetIp = ipOverride || enrollTargetGate;
+    let targetIp = ipOverride || enrollTargetGate;
+    if (!targetIp || targetIp.includes("Cloud")) {
+      targetIp = "192.168.1.202:4370";
+    }
     const targetFid = fidOverride !== null && fidOverride !== undefined ? fidOverride : enrollFingerIndex;
 
     if (!targetPin) {
@@ -727,9 +924,13 @@ export default function DeviceUsersPage() {
       return;
     }
     setIsEnrollingFp(true);
+    setEnrollStep(1); // Active sensor listening mode
+    playTouchBeep(1);
+    clearEnrollTimers();
+
     setEnrollFeedback({
       type: "loading",
-      text: `ម៉ាស៊ីន (${targetIp}) បានបើកសេនស័រ! សូមដាក់ម្រាមដៃ ៣ ដងលើសេនស័រម៉ាស៊ីន... (Terminal sensor active! Touch finger 3 times now)`
+      text: `ម៉ាស៊ីន (${targetIp.replace(/:4370$/, "")}) កំពុងបើកសេនស័រ! សូមដាក់ម្រាមដៃ ៣ ដងលើម៉ាស៊ីនផ្ទាល់... (Terminal sensor active! Please place and lift your finger 3 times on the physical machine sensor as prompted on screen)`
     });
     try {
       const res = await api.post(
@@ -737,6 +938,8 @@ export default function DeviceUsersPage() {
       );
       const resData = res.data?.data;
       if (resData?.success) {
+        clearEnrollTimers();
+        setEnrollStep(4);
         playSuccessChime();
         setEnrollFeedback({
           type: "success",
@@ -754,12 +957,16 @@ export default function DeviceUsersPage() {
         queryClient.invalidateQueries(["batch-roster-users"]);
         refetch();
       } else {
+        clearEnrollTimers();
+        setEnrollStep(0);
         setEnrollFeedback({
           type: "error",
-          text: resData?.message || "Enrollment timed out or was cancelled by user on terminal"
+          text: resData?.message || "Enrollment timed out or was cancelled on terminal (no finger detected or ESC pressed)"
         });
       }
     } catch (err) {
+      clearEnrollTimers();
+      setEnrollStep(0);
       setEnrollFeedback({
         type: "error",
         text: "Enrollment failed: " + (err.response?.data?.message || err.message)
@@ -1128,7 +1335,7 @@ export default function DeviceUsersPage() {
 
           {/* Map Device User */}
           <button
-            onClick={() => setShowCreateModal(true)}
+            onClick={handleOpenCreateModal}
             className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-600 text-white font-bold text-xs shadow-md shadow-indigo-600/25 hover-lift active:scale-95 transition-all cursor-pointer"
           >
             <Plus size={15} />
@@ -1299,8 +1506,8 @@ export default function DeviceUsersPage() {
       <div className="flex flex-wrap items-center justify-between gap-3 p-3.5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
         <div className="flex flex-wrap items-center gap-2.5 flex-1">
           {/* Search Input with Clear Button */}
-          <div className="relative flex-1 min-w-[220px] max-w-sm">
-            <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-500" />
+          <div className="h-10 flex items-center gap-2.5 flex-1 min-w-[220px] max-w-sm px-3.5 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus-within:ring-2 focus-within:ring-indigo-500/30 focus-within:border-indigo-500 dark:focus-within:border-indigo-400 font-medium transition-all">
+            <Search size={16} className="text-slate-400 dark:text-slate-500 shrink-0 pointer-events-none select-none" />
             <input
               type="text"
               placeholder="Search PIN, Name, Card #, ID..."
@@ -1309,7 +1516,7 @@ export default function DeviceUsersPage() {
                 setSearch(e.target.value);
                 setPage(0);
               }}
-              className="w-full pl-9 pr-8 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 font-medium transition-all"
+              className="w-full bg-transparent border-none text-xs text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:ring-0 p-0 leading-normal"
             />
             {search && (
               <button
@@ -1318,7 +1525,7 @@ export default function DeviceUsersPage() {
                   setSearch("");
                   setPage(0);
                 }}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer p-0.5"
+                className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer p-0.5 shrink-0"
                 title="Clear search"
               >
                 <X size={14} />
@@ -1373,10 +1580,10 @@ export default function DeviceUsersPage() {
             }}
             className="px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 font-semibold cursor-pointer"
           >
-            <option value="" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100">All Terminals</option>
+            <option value="" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100">All Terminals (Consolidated 1 Row/User)</option>
             {devices?.map((d) => (
               <option key={d.id} value={d.id} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100">
-                {d.name} ({d.serialNumber})
+                Filter: {d.name} ({d.serialNumber})
               </option>
             ))}
           </select>
@@ -1489,7 +1696,7 @@ export default function DeviceUsersPage() {
                     <span>Loading device mappings...</span>
                   </td>
                 </tr>
-              ) : usersData?.content?.length === 0 ? (
+              ) : groupedUsers.length === 0 ? (
                 <tr>
                   <td colSpan={8} className="py-14 text-center text-slate-400 dark:text-slate-500">
                     <Fingerprint size={36} className="mx-auto mb-2.5 opacity-40 text-slate-400" />
@@ -1500,8 +1707,8 @@ export default function DeviceUsersPage() {
                   </td>
                 </tr>
               ) : (
-                usersData?.content?.map((u) => (
-                  <tr key={u.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/50 transition-colors">
+                groupedUsers.map((u) => (
+                  <tr key={u.devicePin || u.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-800/50 transition-colors">
                     {/* PIN */}
                     <td className="py-3 px-4">
                       <span className="font-mono font-bold text-xs text-indigo-600 dark:text-indigo-400 bg-indigo-50/70 dark:bg-indigo-950/50 px-2 py-0.5 rounded-md border border-indigo-200/60 dark:border-indigo-800/50 inline-block">
@@ -1556,8 +1763,119 @@ export default function DeviceUsersPage() {
 
                     {/* Terminal Device */}
                     <td className="py-3 px-4">
-                      <span className="font-semibold block text-slate-800 dark:text-slate-200">{u.deviceName}</span>
-                      <span className="text-[10px] text-slate-400 dark:text-slate-500 font-mono">{u.deviceSerialNumber}</span>
+                      {u.syncedDevices && u.syncedDevices.length > 0 ? (
+                        <div className="space-y-1.5 min-w-[210px]">
+                          <div className="flex items-center gap-1.5">
+                            {u.deviceCount >= (devices?.length || 1) ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/80 shadow-2xs">
+                                <CheckCircle2 size={11} className="text-emerald-600 dark:text-emerald-400" />
+                                <span>All {u.deviceCount} Terminals Synced</span>
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800/80 shadow-2xs">
+                                <AlertCircle size={11} className="text-amber-600 dark:text-amber-400" />
+                                <span>{u.deviceCount} of {devices?.length || u.deviceCount} Terminals</span>
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex flex-wrap items-center gap-1">
+                            {u.syncedDevices.map((d) => (
+                              <span
+                                key={d.deviceId}
+                                className="group relative inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-md text-[10px] font-semibold bg-slate-100/90 dark:bg-slate-800/90 border border-slate-200/90 dark:border-slate-700 text-slate-800 dark:text-slate-200 shadow-2xs hover:border-slate-300 dark:hover:border-slate-600 transition-colors"
+                                title={`Terminal: ${d.deviceName} • IP: ${d.ipAddress}:${d.port || 4370} • SN: ${d.deviceSerialNumber}`}
+                              >
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
+                                <span className="font-medium">{d.deviceName?.replace(/^ZKTeco\s+/, "") || "Terminal"}</span>
+                                {d.ipAddress && !d.ipAddress.includes("Cloud") && (
+                                  <span className="text-[9px] text-indigo-600 dark:text-indigo-400 font-mono">({d.ipAddress})</span>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleRemoveDeviceFromUser(u, d);
+                                  }}
+                                  className="ml-0.5 p-0.5 rounded hover:bg-rose-100 dark:hover:bg-rose-950/80 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 transition-colors cursor-pointer"
+                                  title={`Remove user from ${d.deviceName || "this terminal"}`}
+                                >
+                                  <X size={11} className="stroke-[2.5]" />
+                                </button>
+                              </span>
+                            ))}
+
+                            {/* Dropdown / Button to Sync to Missing Terminals */}
+                            {devices && devices.some((dev) => !u.syncedDevices?.some((sd) => sd.deviceId === dev.id)) && (
+                              <div className="relative inline-block">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setActiveAddDevicePin(activeAddDevicePin === u.devicePin ? null : u.devicePin);
+                                  }}
+                                  className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 border border-indigo-200/80 dark:border-indigo-800/80 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 transition-colors cursor-pointer"
+                                  title="Add / sync user to another terminal"
+                                >
+                                  <Plus size={11} className="stroke-[2.5]" />
+                                  <span>Sync</span>
+                                </button>
+                                {activeAddDevicePin === u.devicePin && (
+                                  <div
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="absolute left-0 mt-1 w-52 bg-white dark:bg-slate-900 rounded-xl shadow-xl border border-slate-200 dark:border-slate-800 py-1 z-50 text-xs animate-in fade-in zoom-in-95 duration-150"
+                                  >
+                                    <div className="px-2.5 py-1 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                                      Sync To Terminal:
+                                    </div>
+                                    {devices
+                                      .filter((dev) => !u.syncedDevices?.some((sd) => sd.deviceId === dev.id))
+                                      .map((dev) => (
+                                        <button
+                                          key={dev.id}
+                                          type="button"
+                                          onClick={() => {
+                                            setActiveAddDevicePin(null);
+                                            handleAddDeviceToUser(u, dev.id);
+                                          }}
+                                          className="w-full text-left px-2.5 py-1.5 hover:bg-indigo-50 dark:hover:bg-indigo-950/50 flex items-center justify-between gap-2 text-slate-700 dark:text-slate-200"
+                                        >
+                                          <div className="truncate">
+                                            <div className="font-semibold text-[11px] truncate">{dev.name}</div>
+                                            <div className="text-[9px] text-slate-400 font-mono">{dev.ipAddress || dev.serialNumber}</div>
+                                          </div>
+                                          <Plus size={12} className="text-indigo-600 shrink-0" />
+                                        </button>
+                                      ))}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="space-y-0.5 min-w-[160px]">
+                          <div className="flex items-center justify-between gap-1.5">
+                            <div className="flex items-center gap-1.5">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
+                              <span className="font-semibold text-slate-800 dark:text-slate-200">{u.deviceName || "Terminal"}</span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleRemoveDeviceFromUser(u, { deviceId: u.deviceId, deviceName: u.deviceName, deviceUserId: u.id });
+                              }}
+                              className="p-1 rounded hover:bg-rose-100 dark:hover:bg-rose-950/80 text-slate-400 hover:text-rose-600 transition-colors cursor-pointer"
+                              title="Remove user from this terminal"
+                            >
+                              <X size={11} className="stroke-[2.5]" />
+                            </button>
+                          </div>
+                          <span className="text-[10px] text-slate-400 dark:text-slate-500 font-mono block pl-3">
+                            {u.deviceSerialNumber}
+                          </span>
+                        </div>
+                      )}
                     </td>
 
                     {/* Privilege */}
@@ -1578,10 +1896,12 @@ export default function DeviceUsersPage() {
                         <button
                           type="button"
                           onClick={() => {
+                            clearEnrollTimers();
+                            setEnrollStep(0);
                             setFpEnrollUser(u);
                             setEnrollFeedback(null);
                             setEnrollFingerIndex(0);
-                            setEnrollTargetGate(devices?.[0]?.ipAddress ? `${devices[0].ipAddress}:${devices[0].port || 4370}` : "203.147.129.237:4370");
+                            setEnrollTargetGate("192.168.1.202:4370");
                           }}
                           className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold border transition-all cursor-pointer hover:scale-105 active:scale-95 ${
                             u.fingerprintCount > 0
@@ -1725,9 +2045,9 @@ export default function DeviceUsersPage() {
                           <Edit size={15} />
                         </button>
                         <button
-                          onClick={() => deleteUser(u.id)}
+                          onClick={() => deleteUser(u)}
                           className="p-1.5 rounded-lg text-rose-500 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/50 transition-colors cursor-pointer"
-                          title="Delete Mapping"
+                          title="Delete User from Database & Machine"
                         >
                           <Trash2 size={15} />
                         </button>
@@ -1830,6 +2150,96 @@ export default function DeviceUsersPage() {
                   />
                 </div>
               </div>
+
+              {/* Assigned Hardware Terminals Management */}
+              <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Cpu size={16} className="text-indigo-600 dark:text-indigo-400" />
+                    <span className="font-bold text-slate-900 dark:text-white text-xs">Assigned Hardware Terminals</span>
+                  </div>
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">
+                    {selectedUser?.syncedDevices?.length || (selectedUser?.deviceId ? 1 : 0)} Active
+                  </span>
+                </div>
+                <div className="space-y-1.5">
+                  {selectedUser?.syncedDevices && selectedUser.syncedDevices.length > 0 ? (
+                    selectedUser.syncedDevices.map((d) => (
+                      <div
+                        key={d.deviceId}
+                        className="flex items-center justify-between p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs"
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+                          <div className="min-w-0">
+                            <div className="font-semibold text-slate-800 dark:text-slate-200 truncate">
+                              {d.deviceName}
+                            </div>
+                            <div className="text-[10px] text-slate-400 font-mono truncate">
+                              {d.ipAddress}:{d.port || 4370} • SN: {d.deviceSerialNumber}
+                            </div>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            await handleRemoveDeviceFromUser(selectedUser, d);
+                            setSelectedUser((prev) => ({
+                              ...prev,
+                              syncedDevices: prev.syncedDevices?.filter((sd) => sd.deviceId !== d.deviceId),
+                            }));
+                          }}
+                          className="shrink-0 px-2.5 py-1 rounded-lg bg-rose-50 dark:bg-rose-950/50 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-800 font-semibold text-[11px] flex items-center gap-1 transition-colors cursor-pointer"
+                        >
+                          <Trash2 size={12} />
+                          <span>Remove</span>
+                        </button>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-[11px] text-slate-400 italic p-1">No hardware terminals assigned.</div>
+                  )}
+
+                  {/* Sync to Missing Terminals */}
+                  {devices && devices.some((dev) => !selectedUser?.syncedDevices?.some((sd) => sd.deviceId === dev.id)) && (
+                    <div className="pt-2 border-t border-slate-200 dark:border-slate-800 space-y-1.5">
+                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+                        Sync To Hardware Terminal:
+                      </span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {devices
+                          .filter((dev) => !selectedUser?.syncedDevices?.some((sd) => sd.deviceId === dev.id))
+                          .map((dev) => (
+                            <button
+                              key={dev.id}
+                              type="button"
+                              onClick={async () => {
+                                await handleAddDeviceToUser(selectedUser, dev.id);
+                                setSelectedUser((prev) => ({
+                                  ...prev,
+                                  syncedDevices: [
+                                    ...(prev.syncedDevices || []),
+                                    {
+                                      deviceId: dev.id,
+                                      deviceName: dev.name,
+                                      deviceSerialNumber: dev.serialNumber,
+                                      ipAddress: dev.ipAddress,
+                                      port: dev.port,
+                                    },
+                                  ],
+                                }));
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 font-semibold text-[11px] flex items-center gap-1 transition-colors cursor-pointer"
+                            >
+                              <Plus size={12} />
+                              <span>Sync to {dev.name?.replace(/^ZKTeco\s+/, "") || "Terminal"}</span>
+                            </button>
+                          ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
               {/* Face ID Card */}
               <div className="p-3.5 rounded-2xl bg-indigo-50/50 dark:bg-indigo-950/30 border border-indigo-100 dark:border-indigo-900 flex items-center justify-between gap-4">
                 <div className="flex items-center gap-3">
@@ -1887,18 +2297,15 @@ export default function DeviceUsersPage() {
                         onChange={(e) => setEnrollTargetGate(e.target.value)}
                         className="w-full px-2.5 py-1.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-xs font-semibold"
                       >
-                        {devices && devices.length > 0 ? (
-                          devices.map((d) => (
-                            <option key={d.id} value={d.ipAddress || d.ip_address || d.id}>
-                              {d.name || `Gate ${d.id}`} ({d.ipAddress || d.ip_address}:{d.port || 4370})
+                        <option value="192.168.1.202:4370">ZKTeco Terminal 202 (192.168.1.202:4370 - Gate 2)</option>
+                        <option value="192.168.1.201:4370">ZKTeco Terminal 201 (192.168.1.201:4370 - Gate 1)</option>
+                        {devices && devices
+                          .filter((d) => d.ipAddress && !d.ipAddress.includes("Cloud") && d.integrationType !== "ADMS_PUSH" && d.ipAddress !== "192.168.1.201" && d.ipAddress !== "192.168.1.202")
+                          .map((d) => (
+                            <option key={d.id} value={`${d.ipAddress}:${d.port || 4370}`}>
+                              {d.name || `Gate ${d.id}`} ({d.ipAddress}:{d.port || 4370})
                             </option>
-                          ))
-                        ) : (
-                          <>
-                            <option value="203.147.129.237:4371">ZKTeco 1 (203.147.129.237:4371)</option>
-                            <option value="203.147.129.237:4370">ZKTeco 2 (203.147.129.237:4370)</option>
-                          </>
-                        )}
+                          ))}
                       </select>
                     </div>
                     <div>
@@ -1946,16 +2353,46 @@ export default function DeviceUsersPage() {
                     )}
                   </button>
 
-                  {/* Active Sensor Live Progress */}
+                  {/* Active Sensor Live Progress (Mini 3-Step ZK Terminal Display) */}
                   {isEnrollingFp && (
-                    <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between text-xs font-semibold text-amber-800 dark:text-amber-300 animate-in fade-in">
-                      <div className="flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-amber-500 animate-ping" />
-                        <span>សេនស័រកំពុងរង់ចាំស្កេន ៣ ដង...</span>
+                    <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800 text-white space-y-2.5 animate-in fade-in">
+                      <div className="flex items-center justify-between text-[11px] font-mono border-b border-slate-800 pb-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping" />
+                          <span className="text-slate-300 font-bold">ZK SENSOR ACTIVE</span>
+                        </div>
+                        <span className="text-cyan-400 font-bold">{enrollStep === 4 ? "3/3 DONE" : "3-TOUCH CAPTURE"}</span>
                       </div>
-                      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-950 font-bold">
-                        Touch 1 • 2 • 3
-                      </span>
+                      <div className="grid grid-cols-3 gap-2">
+                        {[
+                          { num: 1, label: "Touch 1", sub: "Place" },
+                          { num: 2, label: "Touch 2", sub: "Lift & Place" },
+                          { num: 3, label: "Touch 3", sub: "Confirm" }
+                        ].map((item) => {
+                          const isDone = enrollStep === 4;
+                          return (
+                            <div
+                              key={item.num}
+                              className={`p-2 rounded-xl flex flex-col items-center justify-center border text-center transition-all ${
+                                isDone
+                                  ? "bg-emerald-950/60 border-emerald-500/80 text-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.3)]"
+                                  : "bg-cyan-950/50 border-cyan-400 text-cyan-300 shadow-[0_0_15px_rgba(6,182,212,0.4)]"
+                              }`}
+                            >
+                              <Fingerprint size={22} className={!isDone ? "animate-pulse" : ""} />
+                              <span className="text-[10px] font-mono font-bold mt-1">
+                                {isDone ? "✓ Done" : item.label}
+                              </span>
+                              <span className="text-[8px] font-mono opacity-70">
+                                {isDone ? "Captured" : item.sub}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <p className="text-[10px] text-center text-slate-400 font-mono">
+                        👉 សូមដាក់ម្រាមដៃ ៣ ដងតាមការណែនាំលើអេក្រង់ម៉ាស៊ីន (Follow machine screen: Touch 1 ➔ Touch 2 ➔ Touch 3)
+                      </p>
                     </div>
                   )}
 
@@ -2012,7 +2449,7 @@ export default function DeviceUsersPage() {
                   </label>
                   <input
                     type="text"
-                    placeholder="e.g. 0012938475"
+                    placeholder="e.g. 12938475"
                     value={biometricsForm.cardNumber}
                     onChange={(e) => setBiometricsForm({ ...biometricsForm, cardNumber: e.target.value })}
                     className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono"
@@ -2144,6 +2581,15 @@ export default function DeviceUsersPage() {
               className="flex flex-col flex-1 overflow-hidden"
             >
               <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-4 text-xs">
+                {createMutation.isError && (
+                  <div className="p-3 rounded-xl bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 flex items-start gap-2">
+                    <AlertCircle size={16} className="shrink-0 mt-0.5 text-red-500" />
+                    <div>
+                      <p className="font-bold">Mapping Conflict</p>
+                      <p className="text-[11px] mt-0.5">{createMutation.error?.response?.data?.message || createMutation.error?.message}</p>
+                    </div>
+                  </div>
+                )}
                 <div>
                   <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">
                     Target Terminal (Destination) *
@@ -2263,6 +2709,15 @@ export default function DeviceUsersPage() {
               className="flex flex-col flex-1 overflow-hidden"
             >
               <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-4 text-xs">
+                {createMutation.isError && (
+                  <div className="p-3 rounded-xl bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 flex items-start gap-2">
+                    <AlertCircle size={16} className="shrink-0 mt-0.5 text-red-500" />
+                    <div>
+                      <p className="font-bold">Mapping Conflict</p>
+                      <p className="text-[11px] mt-0.5">{createMutation.error?.response?.data?.message || createMutation.error?.message}</p>
+                    </div>
+                  </div>
+                )}
                 <div>
                   <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">
                     Target Terminal *
@@ -2290,7 +2745,15 @@ export default function DeviceUsersPage() {
                       <button
                         type="button"
                         onClick={() => {
-                          setCreateForm({ ...createForm, personnelType: "EMPLOYEE", employeeId: "", studentId: "" });
+                          const emp = employees?.[0];
+                          setCreateForm({
+                            ...createForm,
+                            personnelType: "EMPLOYEE",
+                            employeeId: emp?.id ? String(emp.id) : "",
+                            studentId: "",
+                            devicePin: emp?.employeeCode || "",
+                            nameOnDevice: emp?.englishName || emp?.khmerName || "",
+                          });
                           setPersonnelSearch("");
                         }}
                         className={`px-2 py-1 rounded text-[10px] font-bold transition-all cursor-pointer ${
@@ -2304,7 +2767,15 @@ export default function DeviceUsersPage() {
                       <button
                         type="button"
                         onClick={() => {
-                          setCreateForm({ ...createForm, personnelType: "STUDENT", employeeId: "", studentId: "" });
+                          const stu = students?.[0];
+                          setCreateForm({
+                            ...createForm,
+                            personnelType: "STUDENT",
+                            employeeId: "",
+                            studentId: stu?.id ? String(stu.id) : "",
+                            devicePin: stu?.studentCode || "",
+                            nameOnDevice: stu?.englishName || stu?.khmerName || "",
+                          });
                           setPersonnelSearch("");
                         }}
                         className={`px-2 py-1 rounded text-[10px] font-bold transition-all cursor-pointer ${
@@ -2318,8 +2789,15 @@ export default function DeviceUsersPage() {
                       <button
                         type="button"
                         onClick={() => {
-                          setCreateForm({ ...createForm, personnelType: "UNASSIGNED", employeeId: "", studentId: "" });
+                          setCreateForm({
+                            ...createForm,
+                            personnelType: "UNASSIGNED",
+                            employeeId: "",
+                            studentId: "",
+                            nameOnDevice: "",
+                          });
                           setPersonnelSearch("");
+                          fetchNextDevicePin();
                         }}
                         className={`px-2 py-1 rounded text-[10px] font-bold transition-all cursor-pointer ${
                           createForm.personnelType === "UNASSIGNED"
@@ -2335,14 +2813,14 @@ export default function DeviceUsersPage() {
                   {createForm.personnelType !== "UNASSIGNED" && (
                     <div className="space-y-2 pt-1">
                       {/* Search Bar */}
-                      <div className="relative">
-                        <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                      <div className="h-9 flex items-center gap-2 px-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 focus-within:ring-2 focus-within:ring-indigo-500/30 focus-within:border-indigo-500 transition-all">
+                        <Search size={14} className="text-slate-400 dark:text-slate-500 shrink-0 pointer-events-none select-none" />
                         <input
                           type="text"
                           placeholder={`Type name or ID to filter ${createForm.personnelType === "EMPLOYEE" ? "staff/teacher" : "student"}...`}
                           value={personnelSearch}
                           onChange={(e) => setPersonnelSearch(e.target.value)}
-                          className="w-full pl-8.5 pr-3 py-1.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                          className="w-full bg-transparent border-none text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 text-xs focus:outline-none focus:ring-0 p-0 leading-normal"
                         />
                       </div>
 
@@ -2357,8 +2835,8 @@ export default function DeviceUsersPage() {
                               ...createForm,
                               employeeId: val,
                               studentId: "",
-                              devicePin: selectedEmp?.employeeCode || createForm.devicePin,
-                              nameOnDevice: selectedEmp?.englishName || createForm.nameOnDevice,
+                              devicePin: selectedEmp?.employeeCode || "",
+                              nameOnDevice: selectedEmp?.englishName || selectedEmp?.khmerName || "",
                             });
                           } else {
                             const selectedStu = students?.find((stu) => String(stu.id) === String(val));
@@ -2366,8 +2844,8 @@ export default function DeviceUsersPage() {
                               ...createForm,
                               studentId: val,
                               employeeId: "",
-                              devicePin: selectedStu?.studentCode || createForm.devicePin,
-                              nameOnDevice: selectedStu?.englishName || selectedStu?.khmerName || createForm.nameOnDevice,
+                              devicePin: selectedStu?.studentCode || "",
+                              nameOnDevice: selectedStu?.englishName || selectedStu?.khmerName || "",
                             });
                           }
                         }}
@@ -2391,20 +2869,83 @@ export default function DeviceUsersPage() {
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
-                    <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">
-                      Device PIN / Keypad User ID *
-                    </label>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="font-semibold text-slate-700 dark:text-slate-300 block">
+                        Device PIN / Keypad User ID *
+                      </label>
+                      {createForm.personnelType === "EMPLOYEE" && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const emp = employees?.find((e) => String(e.id) === String(createForm.employeeId)) || employees?.[0];
+                            if (emp?.employeeCode) {
+                              setCreateForm((prev) => ({
+                                ...prev,
+                                devicePin: emp.employeeCode,
+                                employeeId: String(emp.id),
+                                nameOnDevice: emp.englishName || emp.khmerName || prev.nameOnDevice,
+                              }));
+                            }
+                          }}
+                          className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
+                          title="Get PIN from selected Employee ID"
+                        >
+                          <Check size={11} className="text-emerald-500" />
+                          <span>Get from User ID</span>
+                        </button>
+                      )}
+                      {createForm.personnelType === "STUDENT" && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const stu = students?.find((s) => String(s.id) === String(createForm.studentId)) || students?.[0];
+                            if (stu?.studentCode) {
+                              setCreateForm((prev) => ({
+                                ...prev,
+                                devicePin: stu.studentCode,
+                                studentId: String(stu.id),
+                                nameOnDevice: stu.englishName || stu.khmerName || prev.nameOnDevice,
+                              }));
+                            }
+                          }}
+                          className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
+                          title="Get PIN from selected Student ID"
+                        >
+                          <Check size={11} className="text-emerald-500" />
+                          <span>Get from User ID</span>
+                        </button>
+                      )}
+                      {createForm.personnelType === "UNASSIGNED" && (
+                        <button
+                          type="button"
+                          onClick={fetchNextDevicePin}
+                          disabled={loadingNextPin}
+                          className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
+                          title="Generate fresh unique PIN"
+                        >
+                          <RefreshCw size={11} className={loadingNextPin ? "animate-spin" : ""} />
+                          <span>{loadingNextPin ? "Generating..." : "Auto-Generated PIN"}</span>
+                        </button>
+                      )}
+                    </div>
                     <input
                       type="text"
                       inputMode="numeric"
                       pattern="[0-9]*"
-                      required
-                      placeholder="e.g. 1001"
+                      placeholder="Auto-synced from User ID"
                       value={createForm.devicePin}
                       onChange={(e) => setCreateForm({ ...createForm, devicePin: e.target.value.replace(/\D/g, "") })}
-                      className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono"
+                      className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono font-semibold"
                     />
-                    <p className="text-[10px] text-slate-400 mt-0.5">Numeric keypad PIN (0-9).</p>
+                    {createForm.personnelType !== "UNASSIGNED" && createForm.devicePin ? (
+                      <p className="text-[10px] text-emerald-600 dark:text-emerald-400 mt-1 font-medium flex items-center gap-1">
+                        ✓ Automatically linked from User ID ({createForm.devicePin}). Keypad punches on terminal will match this profile.
+                      </p>
+                    ) : (
+                      <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-1 font-medium flex items-center gap-1">
+                        Select a user above to automatically populate their User ID as Device PIN.
+                      </p>
+                    )}
                   </div>
 
                   <div>
@@ -2430,7 +2971,7 @@ export default function DeviceUsersPage() {
                   </label>
                   <input
                     type="text"
-                    placeholder="e.g. 0012938475"
+                    placeholder="e.g. 12938475"
                     value={createForm.cardNumber}
                     onChange={(e) => setCreateForm({ ...createForm, cardNumber: e.target.value.replace(/\D/g, "") })}
                     className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono"
@@ -2523,6 +3064,15 @@ export default function DeviceUsersPage() {
 
               {/* Body */}
               <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-4 text-xs">
+                {createMutation.isError && (
+                  <div className="p-3 rounded-xl bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 flex items-start gap-2">
+                    <AlertCircle size={16} className="shrink-0 mt-0.5 text-red-500" />
+                    <div>
+                      <p className="font-bold">Mapping Conflict</p>
+                      <p className="text-[11px] mt-0.5">{createMutation.error?.response?.data?.message || createMutation.error?.message}</p>
+                    </div>
+                  </div>
+                )}
                 {/* Stats Summary Card */}
                 <div className="grid grid-cols-2 gap-3">
                   <div className="p-3 rounded-2xl bg-violet-50 dark:bg-violet-950/40 border border-violet-100 dark:border-violet-900/60 flex items-center gap-3">
@@ -2682,6 +3232,15 @@ export default function DeviceUsersPage() {
 
             <form onSubmit={handleQuickCardSubmit} className="flex flex-col flex-1 overflow-hidden">
               <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-4 text-xs">
+                {createMutation.isError && (
+                  <div className="p-3 rounded-xl bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 flex items-start gap-2">
+                    <AlertCircle size={16} className="shrink-0 mt-0.5 text-red-500" />
+                    <div>
+                      <p className="font-bold">Mapping Conflict</p>
+                      <p className="text-[11px] mt-0.5">{createMutation.error?.response?.data?.message || createMutation.error?.message}</p>
+                    </div>
+                  </div>
+                )}
                 {/* Animated Card Scanner Graphic */}
                 <div className="relative p-6 rounded-2xl bg-gradient-to-b from-cyan-50/70 to-indigo-50/40 dark:from-cyan-950/30 dark:to-indigo-950/30 border-2 border-dashed border-cyan-300 dark:border-cyan-700 flex flex-col items-center justify-center text-center space-y-2">
                   <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-cyan-600 to-indigo-600 text-white flex items-center justify-center shadow-lg shadow-cyan-600/30 animate-bounce">
@@ -2704,19 +3263,19 @@ export default function DeviceUsersPage() {
                       ref={quickInputRef}
                       type="text"
                       autoFocus
-                      placeholder="e.g. 0012938475 or 197, 27883"
+                      placeholder="Enter or scan card number..."
                       value={quickCardInput}
                       onChange={(e) => setQuickCardInput(e.target.value)}
                       className="w-full px-4 py-3 text-lg rounded-2xl bg-slate-50 dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 focus:border-cyan-500 text-slate-900 dark:text-white font-mono tracking-wider text-center focus:outline-none focus:ring-4 focus:ring-cyan-500/20 transition-all shadow-inner"
                     />
                     {quickCardInput && (
                       <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-mono text-cyan-600 dark:text-cyan-400 bg-cyan-50 dark:bg-cyan-950 px-2 py-0.5 rounded-md border border-cyan-200 dark:border-cyan-800">
-                        Clean: {parseRfidCardInput(quickCardInput) || "..."}
+                        Card: {parseRfidCardInput(quickCardInput) || "..."}
                       </span>
                     )}
                   </div>
                   <p className="text-[10px] text-slate-400 mt-1">
-                    Supports standard 10-digit decimal, Wiegand (e.g. 197, 27883), or Hex.
+                    Real input number is saved exactly as entered without adding extra digits.
                   </p>
                 </div>
 
@@ -2928,14 +3487,14 @@ export default function DeviceUsersPage() {
 
                 {/* Quick Search & Renewal Mode Toggle */}
                 <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-200/60 dark:border-slate-700/60">
-                  <div className="relative flex-1 min-w-[200px]">
-                    <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <div className="h-9 flex items-center gap-2 flex-1 min-w-[200px] px-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus-within:ring-2 focus-within:ring-indigo-500/30 focus-within:border-indigo-500 transition-all">
+                    <Search size={14} className="text-slate-400 dark:text-slate-500 shrink-0 pointer-events-none select-none" />
                     <input
                       type="text"
                       placeholder="Search name, PIN, or class..."
                       value={batchSearchQuery}
                       onChange={(e) => handleFilterChange(setBatchSearchQuery, e.target.value)}
-                      className="w-full pl-7 pr-3 py-1.5 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                      className="w-full bg-transparent border-none text-xs text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:ring-0 p-0 leading-normal"
                     />
                   </div>
 
@@ -3126,7 +3685,7 @@ export default function DeviceUsersPage() {
                       />
                       {batchCardInput && (
                         <span className="absolute right-4 top-1/2 -translate-y-1/2 text-xs font-mono text-cyan-700 dark:text-cyan-300 bg-cyan-100 dark:bg-cyan-900/80 px-2.5 py-1 rounded-lg border border-cyan-300 dark:border-cyan-700">
-                          Parsed: {parseRfidCardInput(batchCardInput)}
+                          Card: {parseRfidCardInput(batchCardInput)}
                         </span>
                       )}
                     </div>
@@ -3297,7 +3856,7 @@ export default function DeviceUsersPage() {
                     />
                     {cardChangeForm.newCardNumber && (
                       <span className="text-[10px] text-cyan-600 font-mono mt-0.5 block">
-                        Parsed: {parseRfidCardInput(cardChangeForm.newCardNumber)}
+                        Card: {parseRfidCardInput(cardChangeForm.newCardNumber)}
                       </span>
                     )}
                   </div>
@@ -3489,6 +4048,8 @@ export default function DeviceUsersPage() {
                 <button
                   type="button"
                   onClick={() => {
+                    clearEnrollTimers();
+                    setEnrollStep(0);
                     setFpEnrollUser(null);
                     setEnrollFeedback(null);
                   }}
@@ -3543,18 +4104,15 @@ export default function DeviceUsersPage() {
                       onChange={(e) => setEnrollTargetGate(e.target.value)}
                       className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-800 dark:text-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none"
                     >
-                      {devices && devices.length > 0 ? (
-                        devices.map((d) => (
-                          <option key={d.id} value={d.ipAddress || d.ip_address || d.id}>
-                            {d.name || `Gate ${d.id}`} ({d.ipAddress || d.ip_address}:{d.port || 4370})
+                      <option value="192.168.1.202:4370">ZKTeco Terminal 202 (192.168.1.202:4370 - Gate 2)</option>
+                      <option value="192.168.1.201:4370">ZKTeco Terminal 201 (192.168.1.201:4370 - Gate 1)</option>
+                      {devices && devices
+                        .filter((d) => d.ipAddress && !d.ipAddress.toLowerCase().includes("cloud") && !d.ipAddress.includes("192.168.1.201") && !d.ipAddress.includes("192.168.1.202"))
+                        .map((d) => (
+                          <option key={d.id} value={`${d.ipAddress}:${d.port || 4370}`}>
+                            {d.name || `Gate ${d.id}`} ({d.ipAddress}:{d.port || 4370})
                           </option>
-                        ))
-                      ) : (
-                        <>
-                          <option value="203.147.129.237:4371">ZKTeco 1 (203.147.129.237:4371)</option>
-                          <option value="203.147.129.237:4370">ZKTeco 2 (203.147.129.237:4370)</option>
-                        </>
-                      )}
+                        ))}
                     </select>
                   </div>
 
@@ -3581,60 +4139,161 @@ export default function DeviceUsersPage() {
                   </div>
                 </div>
 
-                {/* 3-Step Enrollment Guide */}
-                <div className="p-4 rounded-2xl bg-indigo-50/60 dark:bg-indigo-950/30 border border-indigo-100 dark:border-indigo-900/60">
-                  <h5 className="text-xs font-bold text-indigo-900 dark:text-indigo-200 mb-2.5 flex items-center gap-1.5">
-                    <Sparkles size={14} className="text-indigo-500" />
-                    របៀបចុះឈ្មោះក្រយៅដៃ ៣ ជំហាន (3-Step Enrollment)
-                  </h5>
-                  <div className="grid grid-cols-3 gap-2 text-center text-[11px]">
-                    <div className="p-2 rounded-xl bg-white/80 dark:bg-slate-900/80 border border-indigo-200/50 dark:border-indigo-800/50">
-                      <div className="w-5 h-5 rounded-full bg-indigo-600 text-white font-bold mx-auto mb-1 flex items-center justify-center text-[10px]">1</div>
-                      <span className="font-bold text-slate-700 dark:text-slate-200 block">ចុចប៊ូតុងខាងក្រោម</span>
-                      <span className="text-[10px] text-slate-400">Click Activate</span>
-                    </div>
-                    <div className="p-2 rounded-xl bg-white/80 dark:bg-slate-900/80 border border-indigo-200/50 dark:border-indigo-800/50">
-                      <div className="w-5 h-5 rounded-full bg-indigo-600 text-white font-bold mx-auto mb-1 flex items-center justify-center text-[10px]">2</div>
-                      <span className="font-bold text-slate-700 dark:text-slate-200 block">ដាក់ម្រាមដៃ ៣ ដង</span>
-                      <span className="text-[10px] text-slate-400">Press 3 Times</span>
-                    </div>
-                    <div className="p-2 rounded-xl bg-white/80 dark:bg-slate-900/80 border border-indigo-200/50 dark:border-indigo-800/50">
-                      <div className="w-5 h-5 rounded-full bg-emerald-600 text-white font-bold mx-auto mb-1 flex items-center justify-center text-[10px]">3</div>
-                      <span className="font-bold text-slate-700 dark:text-slate-200 block">ម៉ាស៊ីនស្រែកថាជោគជ័យ</span>
-                      <span className="text-[10px] text-slate-400">Auto-syncs Both</span>
-                    </div>
-                  </div>
-                </div>
+                {/* Authentic ZKTeco Machine Terminal LCD Display (3-Step Enrollment) */}
+                <div className="relative overflow-hidden rounded-2xl bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950 border border-slate-800 shadow-2xl p-4 sm:p-5 select-none">
+                  {/* Subtle terminal scanline grid effect overlay */}
+                  <div className="absolute inset-0 bg-[radial-gradient(#1e293b_1px,transparent_1px)] [background-size:16px_16px] opacity-25 pointer-events-none" />
 
-                {/* Active Sensor Live Progress Indicator */}
-                {isEnrollingFp && (
-                  <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 space-y-3 animate-in fade-in duration-200">
-                    <div className="flex items-center gap-3">
-                      <div className="relative w-10 h-10 rounded-2xl bg-amber-500 text-white flex items-center justify-center shrink-0 shadow-md shadow-amber-500/30">
-                        <div className="absolute inset-0 rounded-2xl bg-amber-400 animate-ping opacity-75" />
-                        <Fingerprint size={22} className="relative z-10 animate-pulse" />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <span className="font-extrabold text-xs text-amber-800 dark:text-amber-300 block">
-                          🔴 សេនស័រម៉ាស៊ីនកំពុងដំណើរការ (Machine Sensor Active)
-                        </span>
-                        <span className="text-[11px] text-amber-700 dark:text-amber-400 block">
-                          សូមដាក់ម្រាមដៃរបស់អ្នក ៣ ដងលើម៉ាស៊ីនឥឡូវនេះ...
-                        </span>
-                      </div>
+                  {/* LCD Terminal Top Status Bar */}
+                  <div className="relative z-10 flex items-center justify-between pb-3.5 mb-3.5 border-b border-slate-800/80">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`w-2.5 h-2.5 rounded-full ${
+                          isEnrollingFp
+                            ? "bg-rose-500 animate-ping"
+                            : enrollStep === 4
+                            ? "bg-emerald-400 shadow-[0_0_8px_#34d399]"
+                            : "bg-amber-400 shadow-[0_0_8px_#fbbf24]"
+                        }`}
+                      />
+                      <span className="font-mono text-[11px] font-extrabold tracking-wider uppercase text-slate-200">
+                        {isEnrollingFp
+                          ? `ZK TERMINAL ACTIVE • STEP ${Math.min(enrollStep, 3)}/3`
+                          : enrollStep === 4
+                          ? "ZK TERMINAL • ENROLL COMPLETE"
+                          : "ZK OPTICAL SENSOR READY"}
+                      </span>
                     </div>
-                    {/* 3 Touches Indicator */}
-                    <div className="flex items-center justify-between text-[11px] text-amber-900 dark:text-amber-200 bg-white/70 dark:bg-slate-900/70 p-2.5 rounded-xl border border-amber-200/50 dark:border-amber-800/50 font-semibold">
-                      <div className="flex items-center gap-2">
-                        <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-ping" />
-                        <span>កំពុងរង់ចាំការដាក់ម្រាមដៃ ៣ ដង...</span>
-                      </div>
-                      <span className="text-[10px] font-mono text-amber-700 dark:text-amber-300 font-bold px-2 py-0.5 rounded-md bg-amber-100 dark:bg-amber-950/80">
-                        Touch 1 • Touch 2 • Touch 3
+
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-[10px] font-bold px-2 py-0.5 rounded-md bg-slate-900/90 border border-slate-700/60 text-emerald-400">
+                        PIN: {fpEnrollUser?.devicePin || biometricsForm.devicePin || "—"}
+                      </span>
+                      <span className="font-mono text-[10px] font-bold px-2 py-0.5 rounded-md bg-slate-900/90 border border-slate-700/60 text-cyan-400">
+                        FID: {enrollFingerIndex}
                       </span>
                     </div>
                   </div>
-                )}
+
+                  {/* The 3 Machine Fingerprint Pods */}
+                  <div className="relative z-10 grid grid-cols-3 gap-2.5 sm:gap-3">
+                    {[
+                      { step: 1, labelKh: "លើកទី ១", labelEn: "1st Touch", subKh: "ដាក់ម្រាមដៃ", subEn: "Place Finger" },
+                      { step: 2, labelKh: "លើកទី ២", labelEn: "2nd Touch", subKh: "លើក រួចដាក់ម្ដងទៀត", subEn: "Lift & Place" },
+                      { step: 3, labelKh: "លើកទី ៣", labelEn: "3rd Touch", subKh: "ដាក់បញ្ជាក់លើកចុងក្រោយ", subEn: "Confirm Touch" },
+                    ].map((pod) => {
+                      const isCompleted = enrollStep === 4;
+                      const isActive = isEnrollingFp;
+
+                      return (
+                        <div
+                          key={pod.step}
+                          className={`relative flex flex-col items-center justify-between p-3 rounded-xl border transition-all duration-300 ${
+                            isCompleted
+                              ? "bg-emerald-950/40 border-emerald-500/80 shadow-[0_0_20px_rgba(16,185,129,0.25)]"
+                              : isActive
+                              ? "bg-cyan-950/50 border-cyan-400 shadow-[0_0_25px_rgba(6,182,212,0.4)] ring-2 ring-cyan-400/40"
+                              : "bg-slate-900/60 border-slate-800/80 opacity-70"
+                          }`}
+                        >
+                          {/* Step Badge */}
+                          <div className="w-full flex items-center justify-between mb-2">
+                            <span className="text-[10px] font-extrabold tracking-wider text-slate-400">
+                              {pod.labelKh}
+                            </span>
+                            <span
+                              className={`w-5 h-5 rounded-full flex items-center justify-center font-bold text-[10px] ${
+                                isCompleted
+                                  ? "bg-emerald-500 text-white shadow-md shadow-emerald-500/40"
+                                  : isActive
+                                  ? "bg-cyan-400 text-slate-950 animate-pulse font-extrabold"
+                                  : "bg-slate-800 text-slate-400"
+                              }`}
+                            >
+                              {isCompleted ? "✓" : pod.step}
+                            </span>
+                          </div>
+
+                          {/* Optical Glass Scanner Window */}
+                          <div
+                            className={`relative w-16 h-20 sm:w-20 sm:h-24 rounded-2xl flex items-center justify-center overflow-hidden border transition-all duration-300 ${
+                              isCompleted
+                                ? "bg-gradient-to-b from-emerald-900/40 to-emerald-950/80 border-emerald-500/70"
+                                : isActive
+                                ? "bg-gradient-to-b from-cyan-950/60 to-slate-950 border-cyan-400/80 shadow-inner"
+                                : "bg-slate-950/80 border-slate-800/80"
+                            }`}
+                          >
+                            {/* Glass reflection highlight */}
+                            <div className="absolute top-0 inset-x-0 h-1/2 bg-gradient-to-b from-white/10 to-transparent pointer-events-none rounded-t-2xl" />
+
+                            {/* Fingerprint Silhouette */}
+                            <Fingerprint
+                              size={38}
+                              className={`transition-all duration-300 ${
+                                isCompleted
+                                  ? "text-emerald-400 scale-105"
+                                  : isActive
+                                  ? "text-cyan-300 animate-pulse scale-110"
+                                  : "text-slate-700"
+                              }`}
+                            />
+
+                            {/* Active Laser Scan Line Sweeping Up and Down */}
+                            {isActive && (
+                              <div className="absolute inset-x-0 h-1 bg-gradient-to-r from-transparent via-cyan-400 to-transparent shadow-[0_0_12px_#22d3ee] animate-zk-laser pointer-events-none" />
+                            )}
+
+                            {/* Success Overlay Checkmark */}
+                            {isCompleted && (
+                              <div className="absolute inset-0 bg-emerald-500/20 backdrop-blur-[0.5px] flex items-center justify-center animate-in zoom-in-75 duration-200">
+                                <div className="w-8 h-8 rounded-full bg-emerald-500 text-white flex items-center justify-center shadow-lg shadow-emerald-500/60 font-black text-sm">
+                                  ✓
+                                </div>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Captions below glass */}
+                          <div className="mt-2.5 text-center">
+                            <span
+                              className={`text-[11px] font-bold block ${
+                                isCompleted
+                                  ? "text-emerald-400 font-extrabold"
+                                  : isActive
+                                  ? "text-cyan-300 font-extrabold animate-pulse"
+                                  : "text-slate-400"
+                              }`}
+                            >
+                              {isCompleted ? "✓ បានផ្ទៀងផ្ទាត់" : isActive ? pod.subKh : pod.subKh}
+                            </span>
+                            <span className="text-[9px] font-mono text-slate-500 uppercase tracking-tight block">
+                              {isCompleted ? "Captured" : isActive ? pod.subEn : pod.subEn}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Machine LCD Instruction Ticker Ribbon */}
+                  <div className="relative z-10 mt-3.5 p-2.5 rounded-xl bg-slate-900/90 border border-slate-800 text-[11px] flex items-center justify-between gap-2 font-mono">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className={`w-2 h-2 rounded-full shrink-0 ${isEnrollingFp ? "bg-cyan-400 animate-ping" : enrollStep === 4 ? "bg-emerald-400 shadow-[0_0_8px_#34d399]" : "bg-slate-500"}`} />
+                      <span className="truncate text-slate-300 font-medium">
+                        {isEnrollingFp
+                          ? "👉 ម៉ាស៊ីនបានបើកសេនស័រ! សូមដាក់ម្រាមដៃ ៣ ដងតាមអេក្រង់ម៉ាស៊ីន (Follow machine screen: Touch 1 ➔ Touch 2 ➔ Touch 3)"
+                          : enrollStep === 4
+                          ? "🎉 ចុះឈ្មោះជោគជ័យ! (Enrollment Successful • 3/3 Captured & Synced)"
+                          : "💤 រង់ចាំចុចចាប់ផ្ដើមស្កេន (Ready • Press Activate to Begin)"}
+                      </span>
+                    </div>
+
+                    <span className="shrink-0 text-[10px] font-bold px-2 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700">
+                      {enrollStep === 4 ? "3 / 3 DONE" : isEnrollingFp ? "SENSOR ACTIVE" : "STANDBY"}
+                    </span>
+                  </div>
+                </div>
 
                 {/* Celebratory Success View on Completion */}
                 {enrollFeedback?.type === "success" && (
@@ -3680,6 +4339,8 @@ export default function DeviceUsersPage() {
                 <button
                   type="button"
                   onClick={() => {
+                    clearEnrollTimers();
+                    setEnrollStep(0);
                     setFpEnrollUser(null);
                     setEnrollFeedback(null);
                   }}
@@ -3692,6 +4353,8 @@ export default function DeviceUsersPage() {
                   <button
                     type="button"
                     onClick={() => {
+                      clearEnrollTimers();
+                      setEnrollStep(0);
                       setFpEnrollUser(null);
                       setEnrollFeedback(null);
                     }}

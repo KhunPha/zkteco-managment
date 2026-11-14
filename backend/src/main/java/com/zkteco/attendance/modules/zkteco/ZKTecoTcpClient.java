@@ -10,6 +10,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -36,6 +37,9 @@ public class ZKTecoTcpClient implements BiometricDeviceClient {
     private static final int CMD_DEVICE_INFO = 11;
     private static final int CMD_ATTLOG_RRQ = 9;
     private static final int CMD_USERTEMP_RRQ = 8;
+    private static final int CMD_USER_WRQ = 8;    // Write user (PC -> terminal), same code as USERTEMP_RRQ on ZK4/5 firmware
+    private static final int CMD_DELETE_USER = 18;
+    private static final int CMD_REFRESHDATA = 1013;
     private static final int CMD_AUTH = 1102;
     private static final int CMD_ACK_OK = 2000;
     private static final int CMD_ACK_UNAUTH = 2005;
@@ -221,12 +225,16 @@ public class ZKTecoTcpClient implements BiometricDeviceClient {
             if (session.sessionId == 0) return false;
 
             // ZKTeco CMD_USER_WRQ = 72
-            // 72 bytes user packet structure:
-            // offset 0: 2 bytes pin (short)
-            // offset 2: 1 byte privilege (0=user, 14=admin)
-            // offset 3: 8 bytes password
-            // offset 11: 24 bytes name
-            // offset 35: 4 bytes card number
+            // Full 72-byte user packet structure (matches Python ZK library):
+            // offset 0:  2 bytes  uid/pin (uint16 little-endian)
+            // offset 2:  1 byte   privilege (0=user, 14=admin)
+            // offset 3:  8 bytes  password (ASCII, zero-padded)
+            // offset 11: 24 bytes name (UTF-8, zero-padded)
+            // offset 35: 4 bytes  card number (uint32 little-endian)
+            // offset 39: 1 byte   padding
+            // offset 40: 7 bytes  group_id (ASCII, zero-padded, default "")
+            // offset 47: 1 byte   padding
+            // offset 48: 24 bytes user_id string (ASCII PIN string, zero-padded) - REQUIRED for card binding
             byte[] userPayload = new byte[72];
             ByteBuffer bb = ByteBuffer.wrap(userPayload).order(ByteOrder.LITTLE_ENDIAN);
 
@@ -259,7 +267,16 @@ public class ZKTecoTcpClient implements BiometricDeviceClient {
                 } catch (Exception ignored) {}
             }
 
-            byte[] resp = sendCommand(socket, session, 72, userPayload);
+            // offset 39: 1 byte padding (already zero from new byte[72])
+            // offset 40: 7 bytes group_id - leave as zeros (default group "")
+            // offset 47: 1 byte padding (already zero)
+            // offset 48: 24 bytes user_id string - the PIN as an ASCII string (CRITICAL for ZK6 devices)
+            if (pin != null) {
+                byte[] pinStrBytes = pin.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+                System.arraycopy(pinStrBytes, 0, userPayload, 48, Math.min(pinStrBytes.length, 24));
+            }
+
+            byte[] resp = sendCommand(socket, session, CMD_USER_WRQ, userPayload);
             // Refresh data: CMD_REFRESHDATA = 1013
             sendCommand(socket, session, 1013, new byte[0]);
 
@@ -416,7 +433,7 @@ public class ZKTecoTcpClient implements BiometricDeviceClient {
 
     @Override
     public boolean deleteUser(String ipAddress, int port, String commKey, String pin) {
-        if (ipAddress == null || ipAddress.isBlank()) return false;
+        if (ipAddress == null || ipAddress.isBlank() || "Cloud-Push".equalsIgnoreCase(ipAddress)) return false;
         String host = resolveHost(ipAddress, port);
         try (Socket socket = new Socket()) {
             socket.connect(new InetSocketAddress(host, port), TIMEOUT_MS);
@@ -425,18 +442,47 @@ public class ZKTecoTcpClient implements BiometricDeviceClient {
             Session session = connectSession(socket, commKey);
             if (session.sessionId == 0) return false;
 
-            int pinNum = 0;
+            // Step 1: Temporarily disable device for write safety
+            sendCommand(socket, session, CMD_DISABLEDEVICE, new byte[0]);
+
+            // Step 2: In ZKTeco standalone protocol, CMD_DELETE_USER (18) requires the 2-byte internal UID slot.
+            // Search existing user records to find the matching UID for this PIN.
+            int targetUid = -1;
             try {
-                pinNum = Integer.parseInt(pin.replaceAll("\\D+", ""));
-            } catch (Exception ignored) {}
+                byte[] userResp = sendCommand(socket, session, CMD_USERTEMP_RRQ, new byte[]{0x05});
+                List<RawDeviceUser> users = parseUserRecords(userResp);
+                for (RawDeviceUser u : users) {
+                    if (pin.trim().equalsIgnoreCase(u.getPin())) {
+                        targetUid = u.getUid();
+                        break;
+                    }
+                }
+            } catch (Exception ex) {
+                log.debug("Could not query user list before delete on {}: {}", host, ex.getMessage());
+            }
 
-            ByteBuffer buf = ByteBuffer.allocate(2).order(ByteOrder.LITTLE_ENDIAN);
-            buf.putShort((short) (pinNum & 0xFFFF));
-            byte[] resp = sendCommand(socket, session, 1053, buf.array()); // CMD_DELETE_USER = 1053
-            sendCommand(socket, session, 1013, new byte[0]); // CMD_REFRESHDATA = 1013
+            // Fallback: If not matched in user list, parse pin digits directly as UID
+            if (targetUid <= 0) {
+                try {
+                    targetUid = Integer.parseInt(pin.replaceAll("\\D+", ""));
+                } catch (Exception ignored) {}
+            }
 
+            boolean success = false;
+            if (targetUid > 0) {
+                ByteBuffer buf = ByteBuffer.allocate(2).order(ByteOrder.LITTLE_ENDIAN);
+                buf.putShort((short) (targetUid & 0xFFFF));
+                // CMD_DELETE_USER = 18
+                byte[] resp = sendCommand(socket, session, CMD_DELETE_USER, buf.array());
+                // CMD_REFRESHDATA = 1013
+                sendCommand(socket, session, CMD_REFRESHDATA, new byte[0]);
+                success = getResponseCode(resp) == CMD_ACK_OK;
+            }
+
+            // Step 3: Re-enable device
+            sendCommand(socket, session, CMD_ENABLEDEVICE, new byte[0]);
             disconnectSession(socket, session);
-            return getResponseCode(resp) == CMD_ACK_OK;
+            return success;
         } catch (Exception ex) {
             log.warn("Delete user failed for {}:{}: {}", host, port, ex.getMessage());
             return false;
@@ -818,7 +864,7 @@ public class ZKTecoTcpClient implements BiometricDeviceClient {
         while (offset + recordSize <= data.length) {
             try {
                 ByteBuffer bb = ByteBuffer.wrap(data, offset, recordSize).order(ByteOrder.LITTLE_ENDIAN);
-                int pinNum = bb.getShort() & 0xFFFF;
+                int uid = bb.getShort() & 0xFFFF;
                 int privilege = bb.get() & 0xFF;
                 byte[] pwdBytes = new byte[8];
                 bb.get(pwdBytes);
@@ -829,9 +875,20 @@ public class ZKTecoTcpClient implements BiometricDeviceClient {
                 String cardNumber = card > 0 ? String.valueOf(card) : null;
 
                 String name = new String(nameBytes).trim().replace("\0", "");
-                String pin = String.valueOf(pinNum);
+                
+                // For 72-byte record, the actual user PIN string is stored at byte offset 48-71
+                String pin = String.valueOf(uid);
+                if (recordSize >= 72 && offset + 72 <= data.length) {
+                    byte[] pinStrBytes = new byte[24];
+                    System.arraycopy(data, offset + 48, pinStrBytes, 0, 24);
+                    String decodedPin = new String(pinStrBytes, StandardCharsets.US_ASCII).trim().replace("\0", "");
+                    if (!decodedPin.isEmpty()) {
+                        pin = decodedPin;
+                    }
+                }
 
                 users.add(RawDeviceUser.builder()
+                        .uid(uid)
                         .pin(pin)
                         .name(name)
                         .privilege(privilege == 14 ? "ADMIN" : "NORMAL_USER")

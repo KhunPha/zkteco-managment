@@ -28,8 +28,11 @@ public class Employee extends BaseEntity {
     @JoinColumn(name = "user_id")
     private User user;
 
-    @Column(name = "employee_code", nullable = false, unique = true, length = 50)
+    @Column(name = "employee_code", nullable = false, length = 50)
     private String employeeCode;
+
+    @Column(name = "id_number", length = 100)
+    private String idNumber; // Text ID: e.g. FBISS0001 (Staff) or FBIST0001 (Teacher)
 
     @Column(name = "khmer_name", length = 150)
     private String khmerName;
@@ -85,7 +88,35 @@ public class Employee extends BaseEntity {
     @JoinColumn(name = "supervisor_id")
     private Employee supervisor;
 
+    @Builder.Default
+    @Column(name = "company_code", nullable = false, length = 50)
+    private String companyCode = "default";
+
+    @Builder.Default
+    @Column(name = "staff_type", nullable = false, length = 50)
+    private String staffType = "EMPLOYEE"; // EMPLOYEE, TEACHER
+
+    @Builder.Default
+    @Column(name = "is_teacher", nullable = false)
+    private Boolean isTeacher = false;
+
     @Column(name = "deleted_at")
     private Instant deletedAt;
+
+    @PrePersist
+    @PreUpdate
+    public void syncTeacherFlags() {
+        if ("TEACHER".equalsIgnoreCase(staffType) || Boolean.TRUE.equals(isTeacher)) {
+            this.staffType = "TEACHER";
+            this.isTeacher = true;
+        } else {
+            this.staffType = "EMPLOYEE";
+            this.isTeacher = false;
+        }
+    }
+
+    public boolean isTeacherPerson() {
+        return Boolean.TRUE.equals(isTeacher) || "TEACHER".equalsIgnoreCase(staffType);
+    }
 }
 

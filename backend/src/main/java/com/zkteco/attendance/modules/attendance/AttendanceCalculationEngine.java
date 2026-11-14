@@ -134,12 +134,18 @@ public class AttendanceCalculationEngine {
                     pins.add(emp.getEmployeeCode());
                 }
 
-                // Collect punches for this employee
+                // Collect punches strictly belonging to this employee's company
                 List<AttendanceRawLog> empPunches = new ArrayList<>();
+                String empCompany = emp.getCompanyCode() != null ? emp.getCompanyCode().trim().toLowerCase() : "default";
                 for (String pin : pins) {
                     List<AttendanceRawLog> pinLogs = logsByPin.get(pin);
                     if (pinLogs != null) {
-                        empPunches.addAll(pinLogs);
+                        for (AttendanceRawLog raw : pinLogs) {
+                            String rawCompany = raw.getCompanyCode() != null ? raw.getCompanyCode().trim().toLowerCase() : "default";
+                            if (empCompany.equalsIgnoreCase(rawCompany)) {
+                                empPunches.add(raw);
+                            }
+                        }
                     }
                 }
                 empPunches.sort(Comparator.comparing(AttendanceRawLog::getPunchTime));
@@ -150,6 +156,9 @@ public class AttendanceCalculationEngine {
                         .build());
 
                 record.setShift(shift);
+                if (emp.getCompanyCode() != null && !emp.getCompanyCode().isBlank()) {
+                    record.setCompanyCode(emp.getCompanyCode().trim().toLowerCase());
+                }
 
                 if (empPunches.isEmpty()) {
                     // No punches recorded for this employee
@@ -180,7 +189,9 @@ public class AttendanceCalculationEngine {
                     TwoShiftPunches tsp = resolveTwoShiftPunches(empPunches, shift);
 
                     Instant firstCheckIn = tsp.s1In != null ? tsp.s1In : tsp.s2In;
-                    Instant lastCheckOut = tsp.s2Out != null ? tsp.s2Out : (tsp.s1Out != null ? tsp.s1Out : null);
+                    Instant lastCheckOut = tsp.s2Out != null
+                            ? tsp.s2Out
+                            : (tsp.s2In == null && tsp.s1Out != null ? tsp.s1Out : null);
 
                     record.setFirstCheckIn(firstCheckIn);
                     record.setShift1CheckOut(tsp.s1Out);
@@ -236,18 +247,36 @@ public class AttendanceCalculationEngine {
                             breakMinutes = (int) Duration.between(shift.getBreakStart(), shift.getBreakEnd()).toMinutes();
                         }
 
-                        // Early Departure & Overtime (only when afternoon/final check-out exists, or when not current ongoing day)
-                        if (tsp.s2Out != null || (tsp.s1Out != null && tsp.s2In == null && !date.equals(LocalDate.now()))) {
-                            Instant effectiveOut = tsp.s2Out != null ? tsp.s2Out : tsp.s1Out;
-                            LocalTime outLocalTime = TimeUtils.toPhnomPenhLocalTime(effectiveOut);
-                            LocalTime shiftEnd = shift.getEndTime();
-
-                            if (outLocalTime.isBefore(shiftEnd.minusMinutes(graceEarly))) {
-                                earlyLeaveMinutes = (int) Duration.between(outLocalTime, shiftEnd).toMinutes();
-                            } else if (outLocalTime.isAfter(shiftEnd)) {
-                                overtimeMinutes = (int) Duration.between(shiftEnd, outLocalTime).toMinutes();
+                        // Early Departure for Shift 1 (Lunch break early leave) and Shift 2 (Evening early leave)
+                        int s1Early = 0;
+                        if (tsp.s1Out != null && shift.getBreakStart() != null) {
+                            LocalTime s1OutLt = TimeUtils.toPhnomPenhLocalTime(tsp.s1Out);
+                            LocalTime breakStart = shift.getBreakStart();
+                            if (s1OutLt.isBefore(breakStart.minusMinutes(graceEarly))) {
+                                s1Early = (int) Duration.between(s1OutLt, breakStart).toMinutes();
                             }
                         }
+
+                        int s2Early = 0;
+                        if (tsp.s2Out != null) {
+                            LocalTime s2OutLt = TimeUtils.toPhnomPenhLocalTime(tsp.s2Out);
+                            LocalTime shiftEnd = shift.getEndTime();
+                            if (s2OutLt.isBefore(shiftEnd.minusMinutes(graceEarly))) {
+                                s2Early = (int) Duration.between(s2OutLt, shiftEnd).toMinutes();
+                            } else if (s2OutLt.isAfter(shiftEnd)) {
+                                overtimeMinutes = (int) Duration.between(shiftEnd, s2OutLt).toMinutes();
+                            }
+                        } else if (tsp.s1Out != null && tsp.s2In == null && shift.getBreakStart() == null && !date.equals(LocalDate.now())) {
+                            LocalTime s1OutLt = TimeUtils.toPhnomPenhLocalTime(tsp.s1Out);
+                            LocalTime shiftEnd = shift.getEndTime();
+                            if (s1OutLt.isBefore(shiftEnd.minusMinutes(graceEarly))) {
+                                s1Early = (int) Duration.between(s1OutLt, shiftEnd).toMinutes();
+                            } else if (s1OutLt.isAfter(shiftEnd)) {
+                                overtimeMinutes = (int) Duration.between(shiftEnd, s1OutLt).toMinutes();
+                            }
+                        }
+
+                        earlyLeaveMinutes = s1Early + s2Early;
 
                         // Accurate total work time across 2 shifts
                         if (tsp.s1In != null && tsp.s1Out != null && tsp.s2In != null && tsp.s2Out != null) {
@@ -255,6 +284,17 @@ public class AttendanceCalculationEngine {
                             long s1 = Duration.between(tsp.s1In, tsp.s1Out).toMinutes();
                             long s2 = Duration.between(tsp.s2In, tsp.s2Out).toMinutes();
                             totalWorkMinutes = (int) (Math.max(0, s1) + Math.max(0, s2));
+                        } else if (tsp.s1In != null && tsp.s1Out != null && tsp.s2In != null && tsp.s2Out == null) {
+                            // Staff finished Shift 1 and is currently clocked in for Shift 2 (ongoing shift)
+                            long s1 = Duration.between(tsp.s1In, tsp.s1Out).toMinutes();
+                            long s2 = Math.max(0, Duration.between(tsp.s2In, Instant.now()).toMinutes());
+                            if (!date.equals(LocalDate.now()) && shift.getEndTime() != null) {
+                                LocalTime s2InLt = TimeUtils.toPhnomPenhLocalTime(tsp.s2In);
+                                if (s2InLt.isBefore(shift.getEndTime())) {
+                                    s2 = Math.max(0, Duration.between(s2InLt, shift.getEndTime()).toMinutes());
+                                }
+                            }
+                            totalWorkMinutes = (int) (Math.max(0, s1) + s2);
                         } else if (tsp.s1In != null && tsp.s1Out != null && tsp.s2In == null) {
                             totalWorkMinutes = (int) Math.max(0, Duration.between(tsp.s1In, tsp.s1Out).toMinutes());
                         } else if (tsp.s2In != null && tsp.s2Out != null && tsp.s1In == null) {
@@ -309,29 +349,57 @@ public class AttendanceCalculationEngine {
                     pins.add(st.getStudentCode());
                 }
 
+                // Collect punches strictly belonging to this student's company
                 List<AttendanceRawLog> stPunches = new ArrayList<>();
+                String stuCompany = st.getCompanyCode() != null ? st.getCompanyCode().trim().toLowerCase() : "default";
                 for (String pin : pins) {
                     List<AttendanceRawLog> pinLogs = logsByPin.get(pin);
                     if (pinLogs != null) {
-                        stPunches.addAll(pinLogs);
+                        for (AttendanceRawLog raw : pinLogs) {
+                            String rawCompany = raw.getCompanyCode() != null ? raw.getCompanyCode().trim().toLowerCase() : "default";
+                            if (stuCompany.equalsIgnoreCase(rawCompany)) {
+                                stPunches.add(raw);
+                            }
+                        }
                     }
                 }
                 stPunches.sort(Comparator.comparing(AttendanceRawLog::getPunchTime));
+
+                // Determine active shift and schedule for this student
+                List<EmployeeSchedule> stuSchedules = scheduleRepository.findActiveStudentSchedules(st.getId(), date);
+                Shift stuShift = defaultShift;
+                boolean isScheduledSchoolDay = true;
+
+                if (!stuSchedules.isEmpty()) {
+                    EmployeeSchedule schedule = stuSchedules.get(0);
+                    stuShift = schedule.getShift();
+                    isScheduledSchoolDay = schedule.isWorkingDay(date.getDayOfWeek());
+                } else {
+                    DayOfWeek dow = date.getDayOfWeek();
+                    // Flexible student study schedules: Monday through Saturday active
+                    isScheduledSchoolDay = (dow != DayOfWeek.SUNDAY);
+                }
+
+                // If student has punches recorded on this day, they are actively present
+                if (!stPunches.isEmpty()) {
+                    isScheduledSchoolDay = true;
+                }
 
                 AttendanceRecord record = existingOpt.orElseGet(() -> AttendanceRecord.builder()
                         .student(st)
                         .attendanceDate(date)
                         .build());
 
-                record.setShift(defaultShift);
+                record.setShift(stuShift);
+                if (st.getCompanyCode() != null && !st.getCompanyCode().isBlank()) {
+                    record.setCompanyCode(st.getCompanyCode().trim().toLowerCase());
+                }
 
                 if (stPunches.isEmpty()) {
-                    DayOfWeek dow = date.getDayOfWeek();
-                    boolean isSchoolDay = (dow != DayOfWeek.SATURDAY && dow != DayOfWeek.SUNDAY);
                     if (isPublicHoliday) {
                         record.setStatus("HOLIDAY");
                         record.setRemarks("Official Holiday");
-                    } else if (!isSchoolDay) {
+                    } else if (!isScheduledSchoolDay) {
                         record.setStatus("REST_DAY");
                         record.setRemarks("Weekend");
                     } else {
@@ -348,9 +416,11 @@ public class AttendanceCalculationEngine {
                     record.setEarlyLeaveMinutes(0);
                     record.setOvertimeMinutes(0);
                 } else {
-                    TwoShiftPunches tsp = resolveTwoShiftPunches(stPunches, defaultShift);
+                    TwoShiftPunches tsp = resolveTwoShiftPunches(stPunches, stuShift);
                     Instant firstCheckIn = tsp.s1In != null ? tsp.s1In : tsp.s2In;
-                    Instant lastCheckOut = tsp.s2Out != null ? tsp.s2Out : (tsp.s1Out != null ? tsp.s1Out : null);
+                    Instant lastCheckOut = tsp.s2Out != null
+                            ? tsp.s2Out
+                            : (tsp.s2In == null && tsp.s1Out != null ? tsp.s1Out : null);
 
                     record.setFirstCheckIn(firstCheckIn);
                     record.setShift1CheckOut(tsp.s1Out);
@@ -362,38 +432,87 @@ public class AttendanceCalculationEngine {
                     record.setOutDevice(tsp.outDevice);
 
                     int lateMinutes = 0;
-                    if (defaultShift != null) {
-                        int graceLate = defaultShift.getGraceLateMinutes();
+                    int earlyLeaveMinutes = 0;
+                    if (stuShift != null) {
+                        int graceLate = stuShift.getGraceLateMinutes();
                         int s1Late = 0;
                         if (tsp.s1In != null) {
                             LocalTime s1InTime = TimeUtils.toPhnomPenhLocalTime(tsp.s1In);
-                            LocalTime shiftStart = defaultShift.getStartTime();
+                            LocalTime shiftStart = stuShift.getStartTime();
                             if (s1InTime.isAfter(shiftStart.plusMinutes(graceLate))) {
                                 s1Late = (int) Duration.between(shiftStart, s1InTime).toMinutes();
                             }
                         }
                         int s2Late = 0;
-                        if (tsp.s2In != null && defaultShift.getBreakEnd() != null) {
+                        if (tsp.s2In != null && stuShift.getBreakEnd() != null) {
                             LocalTime s2InTime = TimeUtils.toPhnomPenhLocalTime(tsp.s2In);
-                            LocalTime s2Start = defaultShift.getBreakEnd();
+                            LocalTime s2Start = stuShift.getBreakEnd();
                             if (s2InTime.isAfter(s2Start.plusMinutes(graceLate))) {
                                 s2Late = (int) Duration.between(s2Start, s2InTime).toMinutes();
                             }
-                        } else if (tsp.s1In == null && tsp.s2In != null && defaultShift.getBreakEnd() == null) {
+                        } else if (tsp.s1In == null && tsp.s2In != null && stuShift.getBreakEnd() == null) {
                             LocalTime s2InTime = TimeUtils.toPhnomPenhLocalTime(tsp.s2In);
-                            LocalTime shiftStart = defaultShift.getStartTime();
+                            LocalTime shiftStart = stuShift.getStartTime();
                             if (s2InTime.isAfter(shiftStart.plusMinutes(graceLate))) {
                                 s2Late = (int) Duration.between(shiftStart, s2InTime).toMinutes();
                             }
                         }
                         lateMinutes = s1Late + s2Late;
+
+                        // Early Departure for Shift 1 & Shift 2
+                        int graceEarly = stuShift.getGraceEarlyLeaveMinutes();
+                        int s1Early = 0;
+                        if (tsp.s1Out != null && stuShift.getBreakStart() != null) {
+                            LocalTime s1OutLt = TimeUtils.toPhnomPenhLocalTime(tsp.s1Out);
+                            LocalTime breakStart = stuShift.getBreakStart();
+                            if (s1OutLt.isBefore(breakStart.minusMinutes(graceEarly))) {
+                                s1Early = (int) Duration.between(s1OutLt, breakStart).toMinutes();
+                            }
+                        }
+
+                        int s2Early = 0;
+                        if (tsp.s2Out != null) {
+                            LocalTime s2OutLt = TimeUtils.toPhnomPenhLocalTime(tsp.s2Out);
+                            LocalTime shiftEnd = stuShift.getEndTime();
+                            if (s2OutLt.isBefore(shiftEnd.minusMinutes(graceEarly))) {
+                                s2Early = (int) Duration.between(s2OutLt, shiftEnd).toMinutes();
+                            }
+                        } else if (tsp.s1Out != null && tsp.s2In == null && stuShift.getBreakStart() == null && !date.equals(LocalDate.now())) {
+                            LocalTime s1OutLt = TimeUtils.toPhnomPenhLocalTime(tsp.s1Out);
+                            LocalTime shiftEnd = stuShift.getEndTime();
+                            if (s1OutLt.isBefore(shiftEnd.minusMinutes(graceEarly))) {
+                                s1Early = (int) Duration.between(s1OutLt, shiftEnd).toMinutes();
+                            }
+                        }
+
+                        earlyLeaveMinutes = s1Early + s2Early;
                     }
 
                     record.setLateMinutes(lateMinutes);
-                    record.setStatus(lateMinutes > 0 ? "LATE" : "PRESENT");
-                    record.setTotalWorkMinutes(record.getLastCheckOut() != null
-                            ? (int) Duration.between(firstCheckIn, record.getLastCheckOut()).toMinutes()
-                            : 0);
+                    record.setEarlyLeaveMinutes(earlyLeaveMinutes);
+                    if (lateMinutes > 0) {
+                        record.setStatus("LATE");
+                    } else if (earlyLeaveMinutes > 0) {
+                        record.setStatus("EARLY_DEPARTURE");
+                    } else {
+                        record.setStatus("PRESENT");
+                    }
+
+                    int stuWork = 0;
+                    if (tsp.s1In != null && tsp.s1Out != null && tsp.s2In != null && tsp.s2Out != null) {
+                        long s1 = Duration.between(tsp.s1In, tsp.s1Out).toMinutes();
+                        long s2 = Duration.between(tsp.s2In, tsp.s2Out).toMinutes();
+                        stuWork = (int) (Math.max(0, s1) + Math.max(0, s2));
+                    } else if (tsp.s1In != null && tsp.s1Out != null && tsp.s2In != null && tsp.s2Out == null) {
+                        long s1 = Duration.between(tsp.s1In, tsp.s1Out).toMinutes();
+                        long s2 = Math.max(0, Duration.between(tsp.s2In, Instant.now()).toMinutes());
+                        stuWork = (int) (Math.max(0, s1) + s2);
+                    } else if (tsp.s1In != null && tsp.s1Out != null) {
+                        stuWork = (int) Math.max(0, Duration.between(tsp.s1In, tsp.s1Out).toMinutes());
+                    } else if (firstCheckIn != null && record.getLastCheckOut() != null) {
+                        stuWork = (int) Math.max(0, Duration.between(firstCheckIn, record.getLastCheckOut()).toMinutes());
+                    }
+                    record.setTotalWorkMinutes(stuWork);
                     record.setRemarks("Student verified attendance");
                 }
 
@@ -491,15 +610,56 @@ public class AttendanceCalculationEngine {
         // 2. Shift 2 (Afternoon Window)
         if (!afternoonPunches.isEmpty()) {
             if (afternoonPunches.size() == 1) {
-                if (res.s1In != null) {
-                    res.s2Out = afternoonPunches.get(0).getPunchTime();
-                    res.outDevice = afternoonPunches.get(0).getDevice();
+                AttendanceRawLog p = afternoonPunches.get(0);
+                LocalTime pTime = TimeUtils.toPhnomPenhLocalTime(p.getPunchTime());
+                String state = p.getPunchState() != null ? p.getPunchState().toUpperCase() : "";
+
+                boolean isExplicitOut = "CHECK_OUT".equals(state) || "BREAK_OUT".equals(state);
+                boolean isExplicitIn = "CHECK_IN".equals(state) || "BREAK_IN".equals(state);
+
+                if (isExplicitOut) {
+                    res.s2Out = p.getPunchTime();
+                    res.outDevice = p.getDevice();
+                } else if (isExplicitIn) {
+                    res.s2In = p.getPunchTime();
+                    res.inDevice = p.getDevice();
                 } else {
-                    res.s2In = afternoonPunches.get(0).getPunchTime();
-                    res.inDevice = afternoonPunches.get(0).getDevice();
+                    // Biometric punch with unspecified or default state
+                    boolean isTwoShiftWithBreak = (shift != null && shift.getBreakStart() != null && shift.getBreakEnd() != null);
+                    if (isTwoShiftWithBreak) {
+                        if (res.s1Out != null) {
+                            // Staff already clocked out for lunch in Shift 1.
+                            // This afternoon punch is returning from lunch to begin Shift 2 (Resume In).
+                            res.s2In = p.getPunchTime();
+                            res.inDevice = p.getDevice();
+                        } else {
+                            // Staff did not clock out for lunch. Determine whether this punch is returning from lunch or leaving for the day.
+                            LocalTime shiftEnd = (shift.getEndTime() != null) ? shift.getEndTime() : LocalTime.of(17, 0);
+                            LocalTime afternoonMidpoint = breakEnd.plusMinutes(Duration.between(breakEnd, shiftEnd).toMinutes() / 2);
+                            if (pTime.isBefore(afternoonMidpoint)) {
+                                // Early afternoon punch (closer to break end) -> Shift 2 Check In
+                                res.s2In = p.getPunchTime();
+                                res.inDevice = p.getDevice();
+                            } else {
+                                // Late afternoon punch (closer to shift end) -> Shift 2 Check Out
+                                res.s2Out = p.getPunchTime();
+                                res.outDevice = p.getDevice();
+                            }
+                        }
+                    } else {
+                        // Single shift (no lunch break)
+                        if (res.s1In != null) {
+                            res.s2Out = p.getPunchTime();
+                            res.outDevice = p.getDevice();
+                        } else {
+                            res.s2In = p.getPunchTime();
+                            res.inDevice = p.getDevice();
+                        }
+                    }
                 }
             } else {
                 res.s2In = afternoonPunches.get(0).getPunchTime();
+                res.inDevice = afternoonPunches.get(0).getDevice();
                 res.s2Out = afternoonPunches.get(afternoonPunches.size() - 1).getPunchTime();
                 res.outDevice = afternoonPunches.get(afternoonPunches.size() - 1).getDevice();
             }

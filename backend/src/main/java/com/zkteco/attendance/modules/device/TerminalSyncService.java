@@ -52,6 +52,9 @@ public class TerminalSyncService {
             devUser.setPrivilege("NORMAL_USER");
             devUser.setSyncStatus("SYNCED");
             devUser.setStatus(emp.getEmploymentStatus() != null ? emp.getEmploymentStatus() : "ACTIVE");
+            if (emp.getCompanyCode() != null && !emp.getCompanyCode().isBlank()) {
+                devUser.setCompanyCode(emp.getCompanyCode().trim().toLowerCase());
+            }
             devUser.setLastSyncedAt(Instant.now());
             deviceUserRepository.save(devUser);
         }
@@ -94,6 +97,9 @@ public class TerminalSyncService {
             devUser.setPrivilege("NORMAL_USER");
             devUser.setSyncStatus("SYNCED");
             devUser.setStatus(student.getStatus() != null ? student.getStatus() : "ACTIVE");
+            if (student.getCompanyCode() != null && !student.getCompanyCode().isBlank()) {
+                devUser.setCompanyCode(student.getCompanyCode().trim().toLowerCase());
+            }
             devUser.setLastSyncedAt(Instant.now());
             deviceUserRepository.save(devUser);
         }
@@ -145,9 +151,18 @@ public class TerminalSyncService {
     }
 
     public CompletableFuture<Boolean> deleteUserFromPhysicalMachinesAsync(String pin) {
+        return deleteUserFromPhysicalMachinesAsync(pin, null, null, null);
+    }
+
+    public CompletableFuture<Boolean> deleteUserFromPhysicalMachinesAsync(String pin, String companyCode) {
+        return deleteUserFromPhysicalMachinesAsync(pin, companyCode, null, null);
+    }
+
+    public CompletableFuture<Boolean> deleteUserFromPhysicalMachinesAsync(
+            String pin, String companyCode, String ip, Integer port) {
         return CompletableFuture.supplyAsync(() -> {
             try {
-                return executeSyncScript("delete", pin, "", "", "NORMAL_USER", "", null, null);
+                return executeSyncScript("delete", pin, "", "", "NORMAL_USER", "", ip, port, companyCode);
             } catch (Exception e) {
                 log.error("Failed to delete user {} from terminals: {}", pin, e.getMessage());
                 return false;
@@ -156,40 +171,102 @@ public class TerminalSyncService {
     }
 
     private boolean executeSyncScript(String action, String pin, String name, String card, String privilege, String password, String ip, Integer port) {
+        return executeSyncScript(action, pin, name, card, privilege, password, ip, port, null);
+    }
+
+    private boolean executeSyncScript(String action, String pin, String name, String card, String privilege, String password, String ip, Integer port, String companyCode) {
         try {
             if ("delete".equalsIgnoreCase(action)) {
-                if (ip != null && !ip.isBlank()) {
-                    return tcpClient.deleteUser(ip, port != null ? port : 4370, null, pin);
+                if (ip != null && !ip.isBlank() && !ip.equalsIgnoreCase("Cloud-Push")) {
+                    boolean ok = tcpClient.deleteUser(ip, port != null ? port : 4370, null, pin);
+                    if (!ok) {
+                        ok = runPythonSyncScript("delete", pin, name, card, privilege, password, ip, port);
+                    }
+                    return ok;
                 }
                 List<AttendanceDevice> activeDevices = deviceRepository.findAll().stream()
                         .filter(AttendanceDevice::isActive)
+                        .filter(d -> d.getIpAddress() != null && !d.getIpAddress().isBlank() && !d.getIpAddress().equalsIgnoreCase("Cloud-Push"))
+                        .filter(d -> companyCode == null || companyCode.isBlank() || "all".equalsIgnoreCase(companyCode)
+                                || companyCode.equalsIgnoreCase(d.getCompanyCode()))
                         .toList();
                 boolean allOk = true;
                 for (AttendanceDevice d : activeDevices) {
-                    if (d.getIpAddress() != null && !d.getIpAddress().isBlank()) {
-                        boolean ok = tcpClient.deleteUser(d.getIpAddress(), d.getPort(), d.getCommKey(), pin);
-                        if (!ok) allOk = false;
+                    boolean ok = tcpClient.deleteUser(d.getIpAddress(), d.getPort(), d.getCommKey(), pin);
+                    if (!ok) {
+                        ok = runPythonSyncScript("delete", pin, name, card, privilege, password, d.getIpAddress(), d.getPort());
                     }
+                    if (!ok) allOk = false;
                 }
                 return allOk;
             } else {
-                if (ip != null && !ip.isBlank()) {
+                if (ip != null && !ip.isBlank() && !ip.equalsIgnoreCase("Cloud-Push")) {
                     return tcpClient.setUserInfo(ip, port != null ? port : 4370, null, pin, name, password, privilege, card);
                 }
                 List<AttendanceDevice> activeDevices = deviceRepository.findAll().stream()
                         .filter(AttendanceDevice::isActive)
+                        .filter(d -> d.getIpAddress() != null && !d.getIpAddress().isBlank() && !d.getIpAddress().equalsIgnoreCase("Cloud-Push"))
+                        .filter(d -> companyCode == null || companyCode.isBlank() || "all".equalsIgnoreCase(companyCode)
+                                || companyCode.equalsIgnoreCase(d.getCompanyCode()))
                         .toList();
                 boolean allOk = true;
                 for (AttendanceDevice d : activeDevices) {
-                    if (d.getIpAddress() != null && !d.getIpAddress().isBlank()) {
-                        boolean ok = tcpClient.setUserInfo(d.getIpAddress(), d.getPort(), d.getCommKey(), pin, name, password, privilege, card);
-                        if (!ok) allOk = false;
-                    }
+                    boolean ok = tcpClient.setUserInfo(d.getIpAddress(), d.getPort(), d.getCommKey(), pin, name, password, privilege, card);
+                    if (!ok) allOk = false;
                 }
                 return allOk;
             }
         } catch (Exception ex) {
-            log.error("Native terminal sync operation failed for PIN {}: {}", pin, ex.getMessage());
+            log.error("Terminal sync operation failed for PIN {}: {}", pin, ex.getMessage());
+            return false;
+        }
+    }
+
+    private boolean runPythonSyncScript(String action, String pin, String name, String card, String privilege, String password, String ip, Integer port) {
+        try {
+            String pythonBin = "/home/sophaederson/zkteco-in01a/venv/bin/python3";
+            if (!new File(pythonBin).exists()) {
+                pythonBin = "python3";
+            }
+
+            File scriptFile = new File("/home/sophaederson/Desktop/Programming/Project/zkteco-managment/scripts/sync_user_to_device.py");
+            if (!scriptFile.exists()) {
+                scriptFile = new File("scripts/sync_user_to_device.py");
+            }
+
+            List<String> cmd = new ArrayList<>(List.of(
+                    pythonBin,
+                    scriptFile.getAbsolutePath(),
+                    "--action", action,
+                    "--pin", pin != null ? pin.trim() : "",
+                    "--name", name != null ? name.trim() : "",
+                    "--card", card != null ? card.trim() : "0",
+                    "--privilege", privilege != null ? privilege.trim() : "NORMAL_USER",
+                    "--password", password != null ? password.trim() : ""
+            ));
+
+            if (ip != null && !ip.isBlank() && !ip.equalsIgnoreCase("Cloud-Push")) {
+                cmd.add("--ip");
+                cmd.add(ip.trim());
+                if (port != null) {
+                    cmd.add("--port");
+                    cmd.add(String.valueOf(port));
+                }
+            }
+
+            log.info("Executing Python terminal sync command: {}", String.join(" ", cmd));
+            ProcessBuilder pb = new ProcessBuilder(cmd);
+            pb.redirectErrorStream(true);
+            Process process = pb.start();
+            boolean finished = process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                log.warn("Terminal sync process timed out for PIN {}", pin);
+                return false;
+            }
+            return process.exitValue() == 0;
+        } catch (Exception e) {
+            log.error("Failed to run python sync script for PIN {}: {}", pin, e.getMessage());
             return false;
         }
     }

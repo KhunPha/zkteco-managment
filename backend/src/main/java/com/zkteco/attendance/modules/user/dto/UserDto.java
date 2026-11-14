@@ -24,6 +24,7 @@ public class UserDto {
     private boolean locked;
     private Instant lastLoginAt;
     private String profileImageUrl;
+    private String companyCode;
     private Set<String> roles;
     private Set<String> permissions;
 }

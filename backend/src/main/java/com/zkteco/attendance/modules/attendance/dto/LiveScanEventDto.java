@@ -32,5 +32,6 @@ public class LiveScanEventDto {
     private String verifyType;
     private String punchState;
     private String statusMessage;
+    private String companyCode;
 }
 

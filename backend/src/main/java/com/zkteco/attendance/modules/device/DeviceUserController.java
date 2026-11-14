@@ -39,9 +39,10 @@ public class DeviceUserController {
             @RequestParam(required = false) String biometricFilter,
             @RequestParam(required = false) String personnelType,
             @RequestParam(required = false) String sortBy,
+            @RequestParam(required = false, defaultValue = "true") Boolean groupByPin,
             @PageableDefault(size = 15) Pageable pageable) {
         return ResponseEntity.ok(ApiResponse.ok(
-                deviceService.getDeviceUsers(deviceId, search, status, biometricFilter, personnelType, sortBy, pageable)
+                deviceService.getDeviceUsers(deviceId, search, status, biometricFilter, personnelType, sortBy, groupByPin, pageable)
         ));
     }
 
@@ -52,6 +53,13 @@ public class DeviceUserController {
             @PathVariable Long id,
             @RequestParam String status) {
         return ResponseEntity.ok(ApiResponse.ok("Device user status updated", deviceService.updateDeviceUserStatus(id, status)));
+    }
+
+    @GetMapping("/next-pin")
+    @PreAuthorize("hasAuthority('device.read') or hasRole('SUPER_ADMIN') or hasRole('ADMIN')")
+    @Operation(summary = "Get next unique auto-generated terminal PIN")
+    public ResponseEntity<ApiResponse<java.util.Map<String, String>>> getNextDevicePin() {
+        return ResponseEntity.ok(ApiResponse.ok(java.util.Map.of("nextPin", deviceService.getNextDevicePin())));
     }
 
     @PostMapping
@@ -77,6 +85,33 @@ public class DeviceUserController {
     public ResponseEntity<ApiResponse<Void>> deleteDeviceUser(@PathVariable Long id) {
         deviceService.deleteDeviceUser(id);
         return ResponseEntity.ok(ApiResponse.ok("Device user unmapped successfully", null));
+    }
+
+    @DeleteMapping("/device/{deviceId}/pin/{pin}")
+    @PreAuthorize("hasAuthority('device.update') or hasRole('SUPER_ADMIN') or hasRole('ADMIN')")
+    @Operation(summary = "Remove user from a specific terminal device and clean from that physical machine")
+    public ResponseEntity<ApiResponse<Void>> removeUserFromDevice(
+            @PathVariable Long deviceId,
+            @PathVariable String pin) {
+        deviceService.removeUserFromDevice(deviceId, pin);
+        return ResponseEntity.ok(ApiResponse.ok("User removed from terminal device successfully", null));
+    }
+
+    @PostMapping("/device/{deviceId}/pin/{pin}")
+    @PreAuthorize("hasAuthority('device.update') or hasRole('SUPER_ADMIN') or hasRole('ADMIN')")
+    @Operation(summary = "Assign/Sync user to a specific terminal device")
+    public ResponseEntity<ApiResponse<DeviceUserDto>> addUserToDevice(
+            @PathVariable Long deviceId,
+            @PathVariable String pin) {
+        return ResponseEntity.ok(ApiResponse.ok("User assigned to terminal device successfully", deviceService.addUserToDevice(deviceId, pin)));
+    }
+
+    @DeleteMapping("/by-pin/{pin}")
+    @PreAuthorize("hasAuthority('device.update') or hasRole('SUPER_ADMIN') or hasRole('ADMIN')")
+    @Operation(summary = "Delete device user by PIN from database and clean from physical terminals")
+    public ResponseEntity<ApiResponse<Void>> deleteDeviceUserByPin(@PathVariable String pin) {
+        deviceService.deleteDeviceUserByPin(pin);
+        return ResponseEntity.ok(ApiResponse.ok("Device user cleaned from terminals and database successfully", null));
     }
 
     @DeleteMapping("/clear-all")

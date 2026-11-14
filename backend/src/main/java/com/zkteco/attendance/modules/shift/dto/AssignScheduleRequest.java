@@ -7,8 +7,8 @@ import java.time.LocalDate;
 
 @Data
 public class AssignScheduleRequest {
-    @NotNull(message = "Employee ID is required")
     private Long employeeId;
+    private Long studentId;
 
     @NotNull(message = "Shift ID is required")
     private Long shiftId;

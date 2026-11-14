@@ -20,6 +20,9 @@ public class AttendanceRecordDto {
     private String employeeName;
     private Long departmentId;
     private String departmentName;
+    private Long branchId;
+    private String branchName;
+    private String branchCode;
     private Long studentId;
     private String studentCode;
     private String studentName;
@@ -41,6 +44,10 @@ public class AttendanceRecordDto {
     private int earlyLeaveMinutes;
     private int overtimeMinutes;
     private int breakMinutes;
+    private int shift1LateMinutes;
+    private int shift1EarlyMinutes;
+    private int shift2LateMinutes;
+    private int shift2EarlyMinutes;
     private String status;
     private boolean manualAdjusted;
     private String remarks;

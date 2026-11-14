@@ -28,11 +28,27 @@ public class AttendanceCorrectionService {
     private final AttendanceCorrectionRepository correctionRepository;
     private final AttendanceRecordRepository recordRepository;
     private final EmployeeRepository employeeRepository;
+    private final com.zkteco.attendance.modules.audit.AuditLogService auditLogService;
 
     @Transactional(readOnly = true)
     public PageResponse<AttendanceCorrectionDto> getCorrections(String status, Pageable pageable) {
-        String filterStatus = (status != null && !status.trim().isEmpty()) ? status.trim().toUpperCase() : "PENDING";
-        Page<AttendanceCorrection> page = correctionRepository.findByStatusOrderByCreatedAtDesc(filterStatus, pageable);
+        String filterStatus = (status != null && !status.trim().isEmpty() && !"ALL".equalsIgnoreCase(status))
+                ? status.trim().toUpperCase() : null;
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        boolean isAll = "all".equalsIgnoreCase(activeTenant);
+
+        Page<AttendanceCorrection> page;
+        if (isAll) {
+            page = filterStatus != null
+                    ? correctionRepository.findByStatusOrderByCreatedAtDesc(filterStatus, pageable)
+                    : correctionRepository.findAllByOrderByCreatedAtDesc(pageable);
+        } else {
+            String tenant = activeTenant.trim().toLowerCase();
+            page = filterStatus != null
+                    ? correctionRepository.findByEmployeeCompanyCodeAndStatusOrderByCreatedAtDesc(tenant, filterStatus, pageable)
+                    : correctionRepository.findByEmployeeCompanyCodeOrderByCreatedAtDesc(tenant, pageable);
+        }
+
         List<AttendanceCorrectionDto> dtos = page.getContent().stream().map(this::toDto).collect(Collectors.toList());
         return PageResponse.of(page, dtos);
     }
@@ -41,6 +57,10 @@ public class AttendanceCorrectionService {
     public AttendanceCorrectionDto submitCorrection(CreateCorrectionRequest request) {
         Employee emp = employeeRepository.findById(request.getEmployeeId())
                 .orElseThrow(() -> new ResourceNotFoundException("Employee", "id", request.getEmployeeId()));
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if (!"all".equalsIgnoreCase(activeTenant) && !activeTenant.equalsIgnoreCase(emp.getCompanyCode())) {
+            throw new ResourceNotFoundException("Employee", "id", request.getEmployeeId());
+        }
 
         AttendanceRecord record = null;
         if (request.getAttendanceRecordId() != null) {
@@ -68,6 +88,10 @@ public class AttendanceCorrectionService {
     public AttendanceCorrectionDto approveCorrection(Long id, Long approverId, ApproveCorrectionRequest request) {
         AttendanceCorrection correction = correctionRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("AttendanceCorrection", "id", id));
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if (!"all".equalsIgnoreCase(activeTenant) && !activeTenant.equalsIgnoreCase(correction.getEmployee().getCompanyCode())) {
+            throw new ResourceNotFoundException("AttendanceCorrection", "id", id);
+        }
 
         if (!"PENDING".equalsIgnoreCase(correction.getStatus())) {
             throw new AppException(ErrorCode.BAD_REQUEST, "Correction request has already been processed");
@@ -91,6 +115,7 @@ public class AttendanceCorrectionService {
                 ).orElseGet(() -> AttendanceRecord.builder()
                         .employee(correction.getEmployee())
                         .attendanceDate(correction.getAttendanceDate())
+                        .companyCode(correction.getEmployee().getCompanyCode() != null ? correction.getEmployee().getCompanyCode() : activeTenant)
                         .build());
             }
 
@@ -108,7 +133,11 @@ public class AttendanceCorrectionService {
             correction.setRejectionReason(request.getRejectionReason());
         }
 
-        return toDto(correctionRepository.save(correction));
+        AttendanceCorrection saved = correctionRepository.save(correction);
+        auditLogService.record("REVIEW_ATTENDANCE_CORRECTION", "ATTENDANCE_CORRECTION", String.valueOf(saved.getId()),
+                "Decision: " + saved.getStatus() + " for " + saved.getEmployee().getEnglishName() + " on " + saved.getAttendanceDate()
+                + (saved.getRejectionReason() != null ? " (Reason: " + saved.getRejectionReason() + ")" : ""));
+        return toDto(saved);
     }
 
     private AttendanceCorrectionDto toDto(AttendanceCorrection c) {

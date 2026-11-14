@@ -55,7 +55,7 @@ export default function LoginPage() {
           <div className="space-y-1.5">
             <label className="text-xs font-semibold text-slate-300">Username or Email</label>
             <div className="relative">
-              <User size={18} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+              <User size={18} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
               <input
                 type="text"
                 {...register("username", { required: "Username is required" })}
@@ -71,7 +71,7 @@ export default function LoginPage() {
           <div className="space-y-1.5">
             <label className="text-xs font-semibold text-slate-300">Password</label>
             <div className="relative">
-              <Lock size={18} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+              <Lock size={18} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
               <input
                 type="password"
                 {...register("password", { required: "Password is required" })}

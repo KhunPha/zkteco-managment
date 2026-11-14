@@ -6,6 +6,7 @@ import lombok.Data;
 @Data
 public class CreateStudentRequest {
     private String studentCode;
+    private String idNumber;
 
     private String khmerName;
 
@@ -20,7 +21,9 @@ public class CreateStudentRequest {
     private String academicYear;
     private String parentContact;
     private String status;
+    private Long branchId;
     private String cardNumber;
     private String profileImageUrl;
+    private Long shiftId;
 }
 

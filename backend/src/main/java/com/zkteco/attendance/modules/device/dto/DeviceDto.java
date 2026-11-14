@@ -31,5 +31,6 @@ public class DeviceDto {
     private Instant lastSync;
     private String firmwareVersion;
     private boolean active;
+    private String companyCode;
 }
 

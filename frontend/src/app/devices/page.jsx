@@ -42,6 +42,7 @@ import {
   ArrowRight,
   CalendarRange,
   Sparkles,
+  Eraser,
 } from "lucide-react";
 import api from "@/lib/api";
 import { formatTime } from "@/lib/utils";
@@ -259,6 +260,31 @@ export default function DevicesPage() {
     if (action === "CLEAR_LOGS" && !confirm(`WARNING: Clear all stored attendance punch records on terminal "${controlDevice.name}"? Make sure all logs have been downloaded first!`)) return;
     if (action === "CLEAR_ADMIN" && !confirm(`RESCUE PHYSICAL MENU: Remove administrator lockout on terminal "${controlDevice.name}"? This allows immediate keypad access to the device settings menu using M/OK.`)) return;
     if (action === "UNLOCK_DOOR" && !confirm(`Trigger door relay on "${controlDevice.name}" for ${voiceIndex} second(s)?`)) return;
+    if (action === "WIPE_ALL_DATA") {
+      if (!confirm(`⚠️ DANGER: COMPLETE FACTORY WIPE FOR TERMINAL "${controlDevice.name}" (${controlDevice.ipAddress})\n\nThis will completely erase:\n• ALL enrolled users\n• ALL fingerprint biometric templates\n• ALL punch attendance history logs\n• ALL device administrator lockouts\n\nThe physical terminal will be reset to 0 users, 0 fingers, and completely EMPTY.\n\nAre you ABSOLUTELY SURE?`)) return;
+      setControlActionLoading(true);
+      setControlMessage(null);
+      try {
+        const res = await api.post(`/api/v1/devices/${controlDevice.id}/wipe-data`);
+        const data = res.data?.data;
+        setControlMessage({
+          type: data?.success ? "success" : "error",
+          text: data?.message || "Terminal wiped completely clean (0 users, 0 records).",
+        });
+        refetchLiveStatus();
+        queryClient.invalidateQueries(["devices"]);
+        queryClient.invalidateQueries(["device-users"]);
+      } catch (err) {
+        setControlMessage({
+          type: "error",
+          text: err.response?.data?.message || err.message,
+        });
+      } finally {
+        setControlActionLoading(false);
+        setTimeout(() => setControlMessage(null), 8000);
+      }
+      return;
+    }
 
     setControlActionLoading(true);
     setControlMessage(null);
@@ -303,7 +329,7 @@ export default function DevicesPage() {
         type: "error",
       });
     }
-    setTimeout(() => setActionFeedback(null), 7000);
+    setTimeout(() => setActionFeedback(null), 6000);
   };
 
   const syncAllTerminals = async () => {
@@ -369,6 +395,42 @@ export default function DevicesPage() {
       });
     }
     setTimeout(() => setActionFeedback(null), 7000);
+  };
+
+  const handleWipeDeviceData = async (device) => {
+    if (!confirm(
+      `⚠️ DANGER: COMPLETE FACTORY WIPE FOR TERMINAL "${device.name}" (${device.ipAddress})\n\n` +
+      `This will completely erase:\n` +
+      `• ALL enrolled users\n` +
+      `• ALL fingerprint biometric templates\n` +
+      `• ALL punch attendance history logs\n` +
+      `• ALL device administrator lockouts\n\n` +
+      `The physical terminal will be reset to 0 users, 0 fingers, and completely EMPTY.\n\n` +
+      `Are you ABSOLUTELY SURE you want to wipe this machine?`
+    )) {
+      return;
+    }
+
+    setActionFeedback({ text: `Erasing all users, biometrics, and records on ${device.name}...`, type: "loading" });
+    try {
+      const res = await api.post(`/api/v1/devices/${device.id}/wipe-data`);
+      const data = res.data?.data;
+      setActionFeedback({
+        text: `✓ Terminal Wiped: ${res.data?.message || "Terminal is now clean and empty (0 users, 0 records)."}`,
+        type: "success",
+      });
+      queryClient.invalidateQueries(["devices"]);
+      queryClient.invalidateQueries(["device-users"]);
+      if (controlDevice?.id === device.id) {
+        refetchLiveStatus();
+      }
+    } catch (err) {
+      setActionFeedback({
+        text: `✗ Terminal Wipe failed: ${err.response?.data?.message || err.message}`,
+        type: "error",
+      });
+    }
+    setTimeout(() => setActionFeedback(null), 8000);
   };
 
   const handleStartScan = async () => {
@@ -496,14 +558,14 @@ export default function DevicesPage() {
 
       {/* Filter / Search Bar */}
       <div className="flex items-center justify-between gap-4 p-3 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
-        <div className="relative flex-1 max-w-sm">
-          <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+        <div className="h-10 flex items-center gap-2.5 flex-1 max-w-sm px-3.5 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus-within:ring-2 focus-within:ring-indigo-500/30 focus-within:border-indigo-500 dark:focus-within:border-indigo-400 transition-all">
+          <Search size={16} className="text-slate-400 dark:text-slate-500 shrink-0 pointer-events-none select-none" />
           <input
             type="text"
             placeholder="Search by name, SN, IP, or location..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-9 pr-4 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border-none text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            className="w-full bg-transparent border-none text-xs text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:ring-0 font-medium p-0 leading-normal"
           />
         </div>
         <button
@@ -648,6 +710,15 @@ export default function DevicesPage() {
                             title="Download and Wipe Terminal Memory Buffer (Free Hardware Storage)"
                           >
                             <HardDrive size={15} />
+                          </button>
+
+                          {/* Wipe Machine to Empty */}
+                          <button
+                            onClick={() => handleWipeDeviceData(device)}
+                            className="p-1.5 rounded-xl text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 hover:scale-110 active:scale-95 transition-all"
+                            title="Wipe Physical Machine to Empty (0 Users, 0 Logs)"
+                          >
+                            <Eraser size={15} />
                           </button>
 
                           {/* Reboot Terminal */}
@@ -1639,6 +1710,37 @@ export default function DevicesPage() {
                       >
                         <Unlock size={13} />
                         <span>Unlock Keypad</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* COMPLETE FACTORY WIPE / EMPTY MACHINE */}
+                  <div className="p-5 rounded-3xl bg-rose-500/10 border border-rose-300 dark:border-rose-800/80 space-y-3">
+                    <div className="flex items-start gap-3">
+                      <div className="p-2.5 rounded-2xl bg-rose-600 text-white shadow-xs shrink-0 mt-0.5">
+                        <Eraser size={20} />
+                      </div>
+                      <div className="space-y-1">
+                        <h5 className="font-bold text-sm text-rose-950 dark:text-rose-200">
+                          Wipe Physical Machine to Empty (0 Users, 0 Biometrics, 0 Logs)
+                        </h5>
+                        <p className="text-xs text-rose-900/80 dark:text-rose-300/80 leading-relaxed">
+                          Sends <strong>CMD_CLEAR_DATA</strong> and <strong>CMD_CLEAR_ATTLOG</strong> directly to terminal hardware. Completely clears on-device flash memory: deletes all enrolled employees/students, all fingerprint templates, and all punch records.
+                        </p>
+                        <p className="text-[11px] font-semibold text-rose-700 dark:text-rose-400 pt-1">
+                          ⚠️ Extreme Action: Hardware memory will be completely empty. You can re-sync users from the web dashboard anytime.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="pt-2 flex justify-end">
+                      <button
+                        type="button"
+                        disabled={controlActionLoading}
+                        onClick={() => handleRemoteControl("WIPE_ALL_DATA")}
+                        className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs shadow-md transition-all disabled:opacity-50"
+                      >
+                        <Eraser size={15} />
+                        <span>Wipe Machine to Empty</span>
                       </button>
                     </div>
                   </div>

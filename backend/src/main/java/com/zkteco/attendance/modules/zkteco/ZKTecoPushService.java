@@ -22,6 +22,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 
 @Slf4j
 @Service
@@ -37,6 +38,7 @@ public class ZKTecoPushService {
     private final EmployeeRepository employeeRepository;
     private final StudentRepository studentRepository;
     private final com.zkteco.attendance.modules.system.TelegramNotificationService telegramService;
+    private final org.springframework.context.ApplicationEventPublisher eventPublisher;
 
     /**
      * Handle ADMS Handshake GET /iclock/cdata
@@ -110,6 +112,38 @@ public class ZKTecoPushService {
                         Optional<AttendanceRawLog> existingOpt = rawLogRepository.findByIdempotencyKey(idempotencyKey);
                         boolean isNew = existingOpt.isEmpty();
 
+                        // Resolve company code from personnel PIN first, fallback to device company code
+                        String resolvedCompanyCode = null;
+                        Optional<AttendanceDeviceUser> devUserCompanyOpt = deviceUserRepository.findByDeviceSerialNumberAndDevicePin(sn, pin);
+                        if (devUserCompanyOpt.isPresent() && devUserCompanyOpt.get().getCompanyCode() != null) {
+                            resolvedCompanyCode = devUserCompanyOpt.get().getCompanyCode();
+                        }
+                        if (resolvedCompanyCode == null) {
+                            Optional<Employee> empCompOpt = employeeRepository.findByEmployeeCodeAndDeletedAtIsNull(pin);
+                            if (empCompOpt.isEmpty()) {
+                                empCompOpt = employeeRepository.findFirstByEmployeeCodeOrderByIdDesc(pin);
+                            }
+                            if (empCompOpt.isPresent() && empCompOpt.get().getCompanyCode() != null) {
+                                resolvedCompanyCode = empCompOpt.get().getCompanyCode();
+                            }
+                        }
+                        if (resolvedCompanyCode == null) {
+                            Optional<Student> stuCompOpt = studentRepository.findByStudentCodeAndDeletedAtIsNull(pin);
+                            if (stuCompOpt.isEmpty()) {
+                                stuCompOpt = studentRepository.findFirstByStudentCodeOrderByIdDesc(pin);
+                            }
+                            if (stuCompOpt.isPresent() && stuCompOpt.get().getCompanyCode() != null) {
+                                resolvedCompanyCode = stuCompOpt.get().getCompanyCode();
+                            }
+                        }
+                        if (resolvedCompanyCode == null && device != null && device.getCompanyCode() != null && !"default".equals(device.getCompanyCode())) {
+                            resolvedCompanyCode = device.getCompanyCode();
+                        }
+                        if (resolvedCompanyCode == null) {
+                            resolvedCompanyCode = (device != null && device.getCompanyCode() != null) ? device.getCompanyCode() : "default";
+                        }
+
+                        AttendanceRawLog targetLog;
                         if (isNew) {
                             AttendanceRawLog rawLog = AttendanceRawLog.builder()
                                     .device(device)
@@ -120,11 +154,23 @@ public class ZKTecoPushService {
                                     .verifyType(verifyType)
                                     .originalPayload(line)
                                     .idempotencyKey(idempotencyKey)
+                                    .companyCode(resolvedCompanyCode)
                                     .processed(false)
                                     .build();
-                            rawLogRepository.save(rawLog);
+                            targetLog = rawLogRepository.save(rawLog);
                             count++;
+                        } else {
+                            targetLog = existingOpt.get();
+                            if ("default".equals(targetLog.getCompanyCode()) && !"default".equals(resolvedCompanyCode)) {
+                                targetLog.setCompanyCode(resolvedCompanyCode);
+                                targetLog = rawLogRepository.save(targetLog);
+                            }
                         }
+
+                        // Broadcast instant SSE event to connected live monitors (under 20ms)
+                        try {
+                            eventPublisher.publishEvent(new com.zkteco.attendance.modules.attendance.event.RawPunchEvent(this, targetLog));
+                        } catch (Exception ignored) {}
 
                         if (isNew || (existingOpt.isPresent() && !existingOpt.get().isProcessed())) {
                             // Dispatch Telegram Alert asynchronously to Teacher / Staff / Student Group
@@ -162,7 +208,7 @@ public class ZKTecoPushService {
                                         String deptName = emp.getDepartment() != null ? emp.getDepartment().getName() : "";
                                         String combined = (posTitle + " " + deptName).toLowerCase();
 
-                                        if (combined.contains("teacher") || combined.contains("teach") ||
+                                        if (emp.isTeacherPerson() || combined.contains("teacher") || combined.contains("teach") ||
                                             combined.contains("lecturer") || combined.contains("professor") ||
                                             combined.contains("instructor") || combined.contains("academic") ||
                                             combined.contains("acad") || combined.contains("គ្រូ") || combined.contains("បង្រៀន")) {
@@ -190,7 +236,7 @@ public class ZKTecoPushService {
                                             String deptName = emp.getDepartment() != null ? emp.getDepartment().getName() : "";
                                             String combined = (posTitle + " " + deptName).toLowerCase();
 
-                                            if (combined.contains("teacher") || combined.contains("teach") ||
+                                            if (emp.isTeacherPerson() || combined.contains("teacher") || combined.contains("teach") ||
                                                 combined.contains("lecturer") || combined.contains("professor") ||
                                                 combined.contains("instructor") || combined.contains("academic") ||
                                                 combined.contains("acad") || combined.contains("គ្រូ") || combined.contains("បង្រៀន")) {
@@ -209,8 +255,14 @@ public class ZKTecoPushService {
                                 String branchName = device != null && device.getBranch() != null ? device.getBranch().getName() : "Main Branch";
                                 String devName = device != null ? device.getName() : "Terminal " + sn;
 
+                                log.info("Dispatching Telegram punch notification: pin={}, personName={}, personType={}, branch={}, device={}",
+                                        pin, personName, personType, branchName, devName);
                                 telegramService.sendPunchNotification(personName, pin, personType, extraDetail, punchState, punchTime, branchName, devName);
-                            } catch (Exception ignored) {}
+                            } catch (Exception ex) {
+                                log.error("Failed to dispatch Telegram punch alert for PIN={}: {}", pin, ex.getMessage(), ex);
+                            }
+                        } else {
+                            log.debug("Skipped Telegram alert for PIN={}: punch already exists and processed", pin);
                         }
                     } catch (Exception ex) {
                         log.warn("Error parsing ADMS attendance line: '{}': {}", line, ex.getMessage());
@@ -235,14 +287,16 @@ public class ZKTecoPushService {
 
             if (!affectedDates.isEmpty()) {
                 rawLogRepository.flush();
-                for (LocalDate date : affectedDates) {
-                    try {
-                        log.info("Auto-calculating daily attendance for date={} after receiving live punches", date);
-                        calculationEngine.processAttendanceForDate(date);
-                    } catch (Exception ex) {
-                        log.error("Failed to auto-calculate attendance for date {}: {}", date, ex.getMessage(), ex);
+                final Set<LocalDate> datesToCalc = new HashSet<>(affectedDates);
+                CompletableFuture.runAsync(() -> {
+                    for (LocalDate date : datesToCalc) {
+                        try {
+                            calculationEngine.processAttendanceForDate(date);
+                        } catch (Exception ex) {
+                            log.error("Failed to auto-calculate attendance for date {}: {}", date, ex.getMessage());
+                        }
                     }
-                }
+                });
             }
         }
 

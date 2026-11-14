@@ -129,6 +129,33 @@ public class ZkDeviceMasterControlService {
                     res.put("success", ok);
                     res.put("message", ok ? "Attendance logs cleared on " + ip : "Device unreachable");
                 }
+                case "clear-all-data" -> {
+                    String pythonPath = System.getProperty("user.home") + "/zkteco-in01a/venv/bin/python3";
+                    String scriptPath = resolveScriptPath("zk_device_control.py");
+                    ProcessBuilder pb = new ProcessBuilder(
+                            pythonPath, scriptPath,
+                            "--ip", ip,
+                            "--port", String.valueOf(port),
+                            "--command", "clear-all-data"
+                    );
+                    pb.redirectError(ProcessBuilder.Redirect.INHERIT);
+                    Process process = pb.start();
+                    boolean finished = process.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);
+                    if (finished && process.exitValue() == 0) {
+                        byte[] stdoutBytes = process.getInputStream().readAllBytes();
+                        String stdout = new String(stdoutBytes, java.nio.charset.StandardCharsets.UTF_8).trim();
+                        try {
+                            JsonNode node = objectMapper.readTree(stdout);
+                            return node;
+                        } catch (Exception ignored) {
+                            res.put("success", true);
+                            res.put("message", stdout);
+                        }
+                    } else {
+                        res.put("success", false);
+                        res.put("message", "Timeout or process error wiping terminal " + ip);
+                    }
+                }
                 default -> {
                     res.put("success", false);
                     res.put("message", "Unknown command: " + command);
@@ -244,7 +271,7 @@ public class ZkDeviceMasterControlService {
         ObjectNode res = objectMapper.createObjectNode();
         try {
             String pythonPath = System.getProperty("user.home") + "/zkteco-in01a/venv/bin/python3";
-            String scriptPath = "scripts/zk_biometric_fp_manager.py";
+            String scriptPath = resolveScriptPath("zk_biometric_fp_manager.py");
             ProcessBuilder pb = new ProcessBuilder(
                     pythonPath, scriptPath,
                     "--action", "clear-all"
@@ -290,7 +317,7 @@ public class ZkDeviceMasterControlService {
         ObjectNode res = objectMapper.createObjectNode();
         try {
             String pythonPath = System.getProperty("user.home") + "/zkteco-in01a/venv/bin/python3";
-            String scriptPath = "scripts/zk_biometric_fp_manager.py";
+            String scriptPath = resolveScriptPath("zk_biometric_fp_manager.py");
             ProcessBuilder pb = new ProcessBuilder(
                     pythonPath, scriptPath,
                     "--action", "clear-all-biometrics"
@@ -321,35 +348,42 @@ public class ZkDeviceMasterControlService {
     public JsonNode enrollRemoteFingerprint(String ip, String pin, int fid) {
         ObjectNode res = objectMapper.createObjectNode();
         try {
-            String targetIp = (ip != null && !ip.isBlank()) ? ip.trim() : "192.168.1.202";
-            log.info("Initiating remote fingerprint enrollment for PIN {} on {}", pin, targetIp);
+            if (pin == null || pin.isBlank()) {
+                res.put("success", false);
+                res.put("message", "User PIN is required for remote enrollment");
+                return res;
+            }
+            String cleanPin = pin.trim();
+            String targetIp = (ip != null && !ip.isBlank() && !ip.toLowerCase().contains("cloud")) ? ip.trim() : "192.168.1.202";
+            log.info("Initiating remote fingerprint enrollment for PIN {} on {}", cleanPin, targetIp);
 
             String pythonPath = System.getProperty("user.home") + "/zkteco-in01a/venv/bin/python3";
-            String scriptPath = "scripts/zk_biometric_fp_manager.py";
+            String scriptPath = resolveScriptPath("zk_biometric_fp_manager.py");
             ProcessBuilder pb = new ProcessBuilder(
                     pythonPath, scriptPath,
                     "--action", "enroll-remote",
                     "--ip", targetIp,
-                    "--pin", pin,
+                    "--pin", cleanPin,
                     "--fid", String.valueOf(fid)
             );
-            // Don't merge stderr into stdout so stdout contains only pure JSON output
-            pb.redirectError(ProcessBuilder.Redirect.INHERIT);
+            pb.redirectError(ProcessBuilder.Redirect.PIPE);
             Process process = pb.start();
 
-            // Wait up to 45 seconds for physical terminal 3-touch capture
-            boolean finished = process.waitFor(45, java.util.concurrent.TimeUnit.SECONDS);
+            // Wait up to 50 seconds for physical terminal 3-touch capture
+            boolean finished = process.waitFor(50, java.util.concurrent.TimeUnit.SECONDS);
             if (!finished) {
                 process.destroyForcibly();
-                log.warn("Remote fingerprint enrollment for PIN {} timed out after 45s", pin);
+                log.warn("Remote fingerprint enrollment for PIN {} timed out after 50s", cleanPin);
                 res.put("success", false);
-                res.put("message", "Enrollment timed out after 45s. Terminal did not receive 3 touches.");
+                res.put("message", "Enrollment timed out after 50s. Terminal sensor did not receive 3 touches.");
                 return res;
             }
 
             int exitCode = process.exitValue();
             byte[] stdoutBytes = process.getInputStream().readAllBytes();
+            byte[] stderrBytes = process.getErrorStream().readAllBytes();
             String stdout = new String(stdoutBytes, java.nio.charset.StandardCharsets.UTF_8).trim();
+            String stderr = new String(stderrBytes, java.nio.charset.StandardCharsets.UTF_8).trim();
             log.info("Remote fingerprint enroll script completed with code {}. Output: {}", exitCode, stdout);
 
             if (!stdout.isEmpty()) {
@@ -359,7 +393,7 @@ public class ZkDeviceMasterControlService {
                     if (isSuccess) {
                         jdbcTemplate.update(
                                 "UPDATE attendance_device_users SET fingerprint_count = GREATEST(COALESCE(fingerprint_count, 0), 1) WHERE device_pin = ?",
-                                pin);
+                                cleanPin);
                     }
                     return jsonNode;
                 } catch (Exception parseEx) {
@@ -372,7 +406,8 @@ public class ZkDeviceMasterControlService {
                 res.put("message", "Fingerprint registered and synchronized to all terminals!");
             } else {
                 res.put("success", false);
-                res.put("message", "Terminal enrollment cancelled or failed on machine (code " + exitCode + ")");
+                String errDetail = !stderr.isEmpty() ? stderr : ("code " + exitCode);
+                res.put("message", "Terminal enrollment cancelled or failed on machine (" + errDetail + ")");
             }
         } catch (Exception ex) {
             log.warn("Remote fingerprint enrollment error: {}", ex.getMessage());
@@ -380,5 +415,20 @@ public class ZkDeviceMasterControlService {
             res.put("message", "Enrollment error: " + ex.getMessage());
         }
         return res;
+    }
+
+    private String resolveScriptPath(String scriptName) {
+        java.io.File f1 = new java.io.File("/home/sophaederson/Desktop/Programming/Project/zkteco-managment/scripts/" + scriptName);
+        if (f1.exists()) return f1.getAbsolutePath();
+        java.io.File f2 = new java.io.File("scripts/" + scriptName);
+        if (f2.exists()) return f2.getAbsolutePath();
+        java.io.File f3 = new java.io.File("../scripts/" + scriptName);
+        if (f3.exists()) return f3.getAbsolutePath();
+        String userDir = System.getProperty("user.dir", ".");
+        java.io.File f4 = new java.io.File(userDir, "scripts/" + scriptName);
+        if (f4.exists()) return f4.getAbsolutePath();
+        java.io.File f5 = new java.io.File(userDir, "../scripts/" + scriptName);
+        if (f5.exists()) return f5.getAbsolutePath();
+        return "scripts/" + scriptName;
     }
 }

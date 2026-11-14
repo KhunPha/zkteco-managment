@@ -9,7 +9,6 @@ public class CreateDeviceUserRequest {
     @NotNull(message = "Device ID is required")
     private Long deviceId;
 
-    @NotBlank(message = "Device PIN is required")
     private String devicePin;
 
     private Long employeeId;

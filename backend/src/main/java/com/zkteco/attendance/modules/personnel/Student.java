@@ -19,8 +19,11 @@ public class Student extends BaseEntity {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(name = "student_code", nullable = false, unique = true, length = 50)
+    @Column(name = "student_code", nullable = false, length = 50)
     private String studentCode;
+
+    @Column(name = "id_number", length = 100)
+    private String idNumber; // Text ID: e.g. FBIS0001 (Student)
 
     @Column(name = "khmer_name", length = 150)
     private String khmerName;
@@ -43,12 +46,20 @@ public class Student extends BaseEntity {
     @Column(name = "parent_contact", length = 100)
     private String parentContact;
 
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "branch_id")
+    private com.zkteco.attendance.modules.organization.Branch branch;
+
     @Builder.Default
     @Column(nullable = false, length = 50)
     private String status = "ACTIVE"; // ACTIVE, GRADUATED, SUSPENDED, WITHDRAWN
 
     @Column(name = "profile_image_url", columnDefinition = "TEXT")
     private String profileImageUrl;
+
+    @Builder.Default
+    @Column(name = "company_code", nullable = false, length = 50)
+    private String companyCode = "default";
 
     @Column(name = "deleted_at")
     private Instant deletedAt;

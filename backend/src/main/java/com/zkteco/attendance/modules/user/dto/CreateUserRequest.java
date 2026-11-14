@@ -25,6 +25,7 @@ public class CreateUserRequest {
     private String lastName;
     private String phoneNumber;
     private String profileImageUrl;
+    private String companyCode;
     private Set<String> roles;
 }
 

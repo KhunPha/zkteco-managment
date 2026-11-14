@@ -21,18 +21,30 @@ public class ShiftService {
 
     @Transactional(readOnly = true)
     public List<ShiftDto> getAllShifts() {
-        return shiftRepository.findAll().stream().map(this::toDto).collect(Collectors.toList());
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        List<Shift> list = "all".equalsIgnoreCase(activeTenant)
+                ? shiftRepository.findAll()
+                : shiftRepository.findByCompanyCode(activeTenant.trim().toLowerCase());
+        return list.stream().map(this::toDto).collect(Collectors.toList());
     }
 
     @Transactional(readOnly = true)
     public ShiftDto getShiftById(Long id) {
-        return toDto(shiftRepository.findById(id)
-                .orElseThrow(() -> new ResourceNotFoundException("Shift", "id", id)));
+        Shift shift = shiftRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Shift", "id", id));
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if (!"all".equalsIgnoreCase(activeTenant) && !activeTenant.equalsIgnoreCase(shift.getCompanyCode())) {
+            throw new ResourceNotFoundException("Shift", "id", id);
+        }
+        return toDto(shift);
     }
 
     @Transactional
     public ShiftDto createShift(CreateShiftRequest request) {
-        if (shiftRepository.existsByCode(request.getCode())) {
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if ("all".equalsIgnoreCase(activeTenant)) activeTenant = "default";
+
+        if (shiftRepository.existsByCompanyCodeAndCode(activeTenant, request.getCode().trim().toUpperCase())) {
             throw new AppException(ErrorCode.DUPLICATE_RESOURCE, "Shift code already exists: " + request.getCode());
         }
 
@@ -50,6 +62,7 @@ public class ShiftService {
                 .flexible(request.getFlexible() != null ? request.getFlexible() : false)
                 .requiresCheckout(request.getRequiresCheckout() != null ? request.getRequiresCheckout() : true)
                 .active(request.getActive() != null ? request.getActive() : true)
+                .companyCode(activeTenant)
                 .build();
 
         return toDto(shiftRepository.save(shift));
@@ -59,6 +72,10 @@ public class ShiftService {
     public ShiftDto updateShift(Long id, CreateShiftRequest request) {
         Shift shift = shiftRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Shift", "id", id));
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if (!"all".equalsIgnoreCase(activeTenant) && !activeTenant.equalsIgnoreCase(shift.getCompanyCode())) {
+            throw new ResourceNotFoundException("Shift", "id", id);
+        }
 
         shift.setName(request.getName().trim());
         shift.setStartTime(request.getStartTime());
@@ -78,7 +95,13 @@ public class ShiftService {
 
     @Transactional
     public void deleteShift(Long id) {
-        shiftRepository.deleteById(id);
+        Shift shift = shiftRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Shift", "id", id));
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if (!"all".equalsIgnoreCase(activeTenant) && !activeTenant.equalsIgnoreCase(shift.getCompanyCode())) {
+            throw new ResourceNotFoundException("Shift", "id", id);
+        }
+        shiftRepository.delete(shift);
     }
 
     public ShiftDto toDto(Shift s) {

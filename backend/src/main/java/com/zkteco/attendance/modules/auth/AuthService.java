@@ -36,6 +36,7 @@ public class AuthService {
     private final RefreshTokenRepository refreshTokenRepository;
     private final PasswordEncoder passwordEncoder;
     private final UserMapper userMapper;
+    private final com.zkteco.attendance.modules.audit.AuditLogService auditLogService;
 
     @Transactional
     public AuthResponse login(LoginRequest request) {
@@ -73,6 +74,7 @@ public class AuthService {
                     log.warn("User {} locked after 5 consecutive failed login attempts", user.getUsername());
                 }
                 userRepository.save(user);
+                auditLogService.record(user.getId(), request.getUsername(), user.getCompanyCode(), "LOGIN_FAILED", "AUTHENTICATION", String.valueOf(user.getId()), null, "Bad credentials entered");
                 throw new AppException(ErrorCode.INVALID_CREDENTIALS);
             }
         }
@@ -84,6 +86,9 @@ public class AuthService {
         user.setFailedLoginAttempts(0);
         user.setLastLoginAt(Instant.now());
         userRepository.save(user);
+
+        // Record successful login audit trail
+        auditLogService.record(user.getId(), user.getUsername(), user.getCompanyCode(), "LOGIN", "AUTHENTICATION", String.valueOf(user.getId()), null, "User successfully authenticated");
 
         // Generate access token
         String accessToken = tokenProvider.generateAccessToken(userPrincipal);
@@ -158,6 +163,13 @@ public class AuthService {
 
     @Transactional
     public void logout(String rawRefreshToken) {
+        try {
+            Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+            if (auth != null && auth.getPrincipal() instanceof UserPrincipal up) {
+                auditLogService.record(up.getId(), up.getUsername(), up.getCompanyCode(), "LOGOUT", "AUTHENTICATION", String.valueOf(up.getId()), null, "User logged out");
+            }
+        } catch (Exception ignored) {}
+
         if (rawRefreshToken != null && !rawRefreshToken.trim().isEmpty()) {
             String hashed = tokenProvider.hashToken(rawRefreshToken);
             refreshTokenRepository.findByTokenHash(hashed).ifPresent(token -> {

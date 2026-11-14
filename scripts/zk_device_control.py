@@ -163,6 +163,51 @@ def cmd_clear_attlog(ip, port):
         except Exception:
             pass
 
+def cmd_clear_all_data(ip, port):
+    """
+    Completely wipe physical machine to empty:
+    Wipes all users, all fingerprint templates, all attendance records, and clears admin lock.
+    """
+    zk, conn = get_connection(ip, port)
+    try:
+        conn.disable_device()
+        try:
+            # Native CMD_CLEAR_DATA (code 14) with byte payload for Python 3 compatibility
+            conn._ZK__send_command(const.CMD_CLEAR_DATA, b"", 8)
+        except Exception as e:
+            logger.warning(f"clear_data on {ip}: {e}")
+
+        try:
+            conn.clear_attendance()
+        except Exception:
+            pass
+
+        try:
+            conn._ZK__send_command(const.CMD_CLEAR_ADMIN, b"", 8)
+        except Exception:
+            pass
+
+        conn.refresh_data()
+        conn.enable_device()
+        conn.read_sizes()
+        return {
+            "success": True,
+            "ip": ip,
+            "users": conn.users,
+            "fingers": conn.fingers,
+            "records": conn.records,
+            "message": f"Successfully wiped machine {ip} to empty. Users: {conn.users}, Fingers: {conn.fingers}, Records: {conn.records}"
+        }
+    finally:
+        try:
+            conn.enable_device()
+        except Exception:
+            pass
+        try:
+            conn.disconnect()
+        except Exception:
+            pass
+
 def cmd_clear_admin(ip, port):
     """Cancel manager/administrator role on device to rescue locked menus without data loss"""
     zk, conn = get_connection(ip, port)
@@ -289,7 +334,7 @@ def main():
     parser.add_argument("--port", type=int, default=4370, help="Terminal port (default 4370)")
     parser.add_argument("--command", required=True, choices=[
         "sync-time", "get-info", "restart", "poweroff", "disable", "enable", "test-voice", "clear-attlog",
-        "clear-admin", "unlock-door", "get-menu-params", "set-menu-params"
+        "clear-admin", "clear-all-data", "unlock-door", "get-menu-params", "set-menu-params"
     ], help="Command to execute")
     parser.add_argument("--voice-index", type=int, default=0, help="Voice prompt index (0 = Thank you)")
     parser.add_argument("--unlock-seconds", type=int, default=3, help="Duration to unlock door relay in seconds")
@@ -316,6 +361,8 @@ def main():
             res = cmd_clear_attlog(args.ip, args.port)
         elif args.command == "clear-admin":
             res = cmd_clear_admin(args.ip, args.port)
+        elif args.command == "clear-all-data":
+            res = cmd_clear_all_data(args.ip, args.port)
         elif args.command == "unlock-door":
             res = cmd_unlock_door(args.ip, args.port, args.unlock_seconds)
         elif args.command == "get-menu-params":

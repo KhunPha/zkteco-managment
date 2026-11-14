@@ -10,6 +10,7 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 @AllArgsConstructor
 public class RawDeviceUser {
+    private int uid;
     private String pin;
     private String name;
     private String privilege; // NORMAL_USER, ADMIN, ENROLLER, SUPER_ADMIN

@@ -12,10 +12,15 @@ public interface DeviceUserRepository extends JpaRepository<AttendanceDeviceUser
     Optional<AttendanceDeviceUser> findByDeviceIdAndDevicePin(Long deviceId, String devicePin);
     List<AttendanceDeviceUser> findByDeviceId(Long deviceId);
     long countByDeviceId(Long deviceId);
+    long countByCompanyCode(String companyCode);
+    List<AttendanceDeviceUser> findByCompanyCode(String companyCode);
     List<AttendanceDeviceUser> findByEmployeeId(Long employeeId);
     List<AttendanceDeviceUser> findByStudentId(Long studentId);
     Optional<AttendanceDeviceUser> findByDeviceSerialNumberAndDevicePin(String serialNumber, String devicePin);
     List<AttendanceDeviceUser> findByDevicePin(String devicePin);
     boolean existsByDeviceIdAndDevicePin(Long deviceId, String devicePin);
+    void deleteByEmployeeId(Long employeeId);
+    void deleteByStudentId(Long studentId);
+    void deleteByDevicePin(String devicePin);
 }
 

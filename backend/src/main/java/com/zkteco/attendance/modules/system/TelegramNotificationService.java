@@ -3,7 +3,19 @@ package com.zkteco.attendance.modules.system;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.zkteco.attendance.common.AppException;
+import com.zkteco.attendance.common.ErrorCode;
 import com.zkteco.attendance.common.TimeUtils;
+import com.zkteco.attendance.modules.attendance.AttendanceRecord;
+import com.zkteco.attendance.modules.attendance.AttendanceRecordRepository;
+import com.zkteco.attendance.modules.personnel.Employee;
+import com.zkteco.attendance.modules.personnel.EmployeeRepository;
+import com.zkteco.attendance.modules.personnel.Student;
+import com.zkteco.attendance.modules.personnel.StudentRepository;
+import com.zkteco.attendance.modules.shift.EmployeeSchedule;
+import com.zkteco.attendance.modules.shift.EmployeeScheduleRepository;
+import com.zkteco.attendance.modules.shift.Shift;
+import com.zkteco.attendance.modules.shift.ShiftRepository;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -19,6 +31,8 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalTime;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 
@@ -28,6 +42,12 @@ import java.util.concurrent.CompletableFuture;
 public class TelegramNotificationService {
 
     private final SystemSettingService settingService;
+    private final AttendanceRecordRepository attendanceRecordRepository;
+    private final EmployeeRepository employeeRepository;
+    private final StudentRepository studentRepository;
+    private final EmployeeScheduleRepository scheduleRepository;
+    private final ShiftRepository shiftRepository;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(6))
@@ -47,6 +67,18 @@ public class TelegramNotificationService {
         private boolean enabled = true;
     }
 
+    @Data
+    @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class StudentClassTelegramGroup {
+        private String id;
+        private String className; // e.g. "Class 8A", "Class 10A"
+        private String chatId;    // Telegram Chat ID e.g. -1005316595198
+        @Builder.Default
+        private boolean enabled = true;
+    }
+
     public boolean isEnabled() {
         return "true".equalsIgnoreCase(settingService.getSettingValue("TELEGRAM_ENABLED", "false"));
     }
@@ -56,8 +88,7 @@ public class TelegramNotificationService {
     }
 
     public String getTeacherChatId() {
-        String val = settingService.getSettingValue("TELEGRAM_TEACHER_CHAT_ID", "").trim();
-        return !val.isBlank() ? val : settingService.getSettingValue("TELEGRAM_CHAT_ID", "").trim();
+        return settingService.getSettingValue("TELEGRAM_TEACHER_CHAT_ID", "").trim();
     }
 
     public boolean isNotifyTeacher() {
@@ -75,8 +106,7 @@ public class TelegramNotificationService {
     }
 
     public String getStudentChatId() {
-        String val = settingService.getSettingValue("TELEGRAM_STUDENT_CHAT_ID", "").trim();
-        return !val.isBlank() ? val : settingService.getSettingValue("TELEGRAM_CHAT_ID", "").trim();
+        return settingService.getSettingValue("TELEGRAM_STUDENT_CHAT_ID", "").trim();
     }
 
     public boolean isNotifyStudent() {
@@ -100,6 +130,19 @@ public class TelegramNotificationService {
         }
     }
 
+    public List<StudentClassTelegramGroup> getStudentClassGroups() {
+        String json = settingService.getSettingValue("TELEGRAM_STUDENT_CLASS_GROUPS", "[]");
+        if (json == null || json.isBlank() || "[]".equals(json.trim())) {
+            return new ArrayList<>();
+        }
+        try {
+            return objectMapper.readValue(json, new TypeReference<List<StudentClassTelegramGroup>>() {});
+        } catch (Exception e) {
+            log.error("Failed to parse TELEGRAM_STUDENT_CLASS_GROUPS JSON: {}", e.getMessage());
+            return new ArrayList<>();
+        }
+    }
+
     public Map<String, Object> getSettings() {
         Map<String, Object> map = new HashMap<>();
         map.put("enabled", isEnabled());
@@ -112,6 +155,7 @@ public class TelegramNotificationService {
         map.put("notifyStudent", isNotifyStudent());
         map.put("notifyLateOnly", isNotifyLateOnly());
         map.put("customGroups", getCustomGroups());
+        map.put("studentClassGroups", getStudentClassGroups());
 
         // Backwards compatibility aliases
         map.put("chatId", getStaffChatId());
@@ -129,28 +173,23 @@ public class TelegramNotificationService {
             String studentChatId,
             boolean notifyStudent,
             boolean notifyLateOnly,
-            List<CustomTelegramGroup> customGroups
+            List<CustomTelegramGroup> customGroups,
+            List<StudentClassTelegramGroup> studentClassGroups
     ) {
         settingService.updateSetting("TELEGRAM_ENABLED", String.valueOf(enabled), "ADMIN");
         if (botToken != null && !botToken.contains("***") && !botToken.isBlank()) {
             settingService.updateSetting("TELEGRAM_BOT_TOKEN", botToken.trim(), "ADMIN");
         }
 
-        if (teacherChatId != null) {
-            settingService.updateSetting("TELEGRAM_TEACHER_CHAT_ID", teacherChatId.trim(), "ADMIN");
-        }
+        settingService.updateSetting("TELEGRAM_TEACHER_CHAT_ID", teacherChatId != null ? teacherChatId.trim() : "", "ADMIN");
         settingService.updateSetting("TELEGRAM_NOTIFY_TEACHER", String.valueOf(notifyTeacher), "ADMIN");
 
-        if (staffChatId != null) {
-            settingService.updateSetting("TELEGRAM_STAFF_CHAT_ID", staffChatId.trim(), "ADMIN");
-            settingService.updateSetting("TELEGRAM_CHAT_ID", staffChatId.trim(), "ADMIN");
-        }
+        settingService.updateSetting("TELEGRAM_STAFF_CHAT_ID", staffChatId != null ? staffChatId.trim() : "", "ADMIN");
+        settingService.updateSetting("TELEGRAM_CHAT_ID", staffChatId != null ? staffChatId.trim() : "", "ADMIN");
         settingService.updateSetting("TELEGRAM_NOTIFY_STAFF", String.valueOf(notifyStaff), "ADMIN");
         settingService.updateSetting("TELEGRAM_NOTIFY_EMPLOYEE", String.valueOf(notifyStaff), "ADMIN");
 
-        if (studentChatId != null) {
-            settingService.updateSetting("TELEGRAM_STUDENT_CHAT_ID", studentChatId.trim(), "ADMIN");
-        }
+        settingService.updateSetting("TELEGRAM_STUDENT_CHAT_ID", studentChatId != null ? studentChatId.trim() : "", "ADMIN");
         settingService.updateSetting("TELEGRAM_NOTIFY_STUDENT", String.valueOf(notifyStudent), "ADMIN");
         settingService.updateSetting("TELEGRAM_NOTIFY_LATE_ONLY", String.valueOf(notifyLateOnly), "ADMIN");
 
@@ -162,6 +201,30 @@ public class TelegramNotificationService {
                 log.error("Failed to serialize TELEGRAM_CUSTOM_GROUPS: {}", e.getMessage());
             }
         }
+
+        if (studentClassGroups != null) {
+            try {
+                String json = objectMapper.writeValueAsString(studentClassGroups);
+                settingService.updateSetting("TELEGRAM_STUDENT_CLASS_GROUPS", json, "ADMIN");
+            } catch (Exception e) {
+                log.error("Failed to serialize TELEGRAM_STUDENT_CLASS_GROUPS: {}", e.getMessage());
+            }
+        }
+    }
+
+    public void saveSettings(
+            boolean enabled,
+            String botToken,
+            String teacherChatId,
+            boolean notifyTeacher,
+            String staffChatId,
+            boolean notifyStaff,
+            String studentChatId,
+            boolean notifyStudent,
+            boolean notifyLateOnly,
+            List<CustomTelegramGroup> customGroups
+    ) {
+        saveSettings(enabled, botToken, teacherChatId, notifyTeacher, staffChatId, notifyStaff, studentChatId, notifyStudent, notifyLateOnly, customGroups, null);
     }
 
     public void saveSettings(
@@ -231,37 +294,68 @@ public class TelegramNotificationService {
     public CompletableFuture<Boolean> sendTestMessage(String target) {
         String nowStr = TimeUtils.formatPhnomPenh(Instant.now());
         if ("teacher".equalsIgnoreCase(target)) {
+            String chatId = getTeacherChatId();
+            if (chatId.isBlank()) {
+                throw new AppException(ErrorCode.BAD_REQUEST, "Teacher Telegram Chat ID is not configured or removed");
+            }
             String msg = """
-                    👨‍🏫 <b>Enterprise Attendance System - Teachers Group</b>
+                    👨‍🏫 <b>[TEACHER ATTENDANCE] វត្តមានលោកគ្រូ-អ្នកគ្រូ (Test)</b>
                     ✅ <b>Telegram Bot Connected Successfully!</b>
                     ━━━━━━━━━━━━━━━━━━━━━
-                    🏢 <b>Channel:</b> ក្រុមគ្រូបង្រៀន & សាស្ត្រាចារ្យ (Faculty & Teachers)
-                    🕒 <b>Timestamp:</b> <code>%s</code>
-                    🔔 <b>Status:</b> Live teacher punch alerts are active.
+                    👤 <b>ឈ្មោះ (Name):</b> Bal Riksann
+                    🆔 <b>កូដសម្គាល់ (Code):</b> <code>1</code>
+                    🏷️ <b>ប្រភេទ (Category):</b> 👨‍🏫 គ្រូបង្រៀន (Teacher)
+                    ⚡ <b>ស្ថានភាព (State):</b> 🟢 ចូល (Check In)
+                    ⏱️ <b>វិន័យម៉ោង (Punctuality):</b> ⚠️ <b>យឺត 15 នាទី (Late +15m)</b>
+                    ⏰ <b>ពេលវេលា (Time):</b> <code>%s</code>
+                    📍 <b>សាខា (Branch):</b> Phnom Penh Main Campus
+                    📟 <b>ម៉ាស៊ីន (Device):</b> ZKTeco Terminal (201)
+                    ━━━━━━━━━━━━━━━━━━━━━
+                    🔔 <b>Status:</b> Live teacher punch & late/early alerts active.
                     """.formatted(nowStr);
-            return sendRawMessageToChat(getTeacherChatId(), msg);
+            return sendRawMessageToChat(chatId, msg);
         } else if ("student".equalsIgnoreCase(target)) {
+            String chatId = getStudentChatId();
+            if (chatId.isBlank()) {
+                throw new AppException(ErrorCode.BAD_REQUEST, "General Student Telegram Chat ID is not configured or removed. Use Class Telegram Groups instead.");
+            }
             String msg = """
-                    🎓 <b>Enterprise Attendance System - Students Group</b>
+                    🎓 <b>[STUDENT ATTENDANCE] វត្តមានសិស្សានុសិស្ស (Test)</b>
                     ✅ <b>Telegram Bot Connected Successfully!</b>
                     ━━━━━━━━━━━━━━━━━━━━━
-                    🏢 <b>Channel:</b> ក្រុមសិស្សានុសិស្ស & អាណាព្យាបាល (Students & Guardians)
-                    🕒 <b>Timestamp:</b> <code>%s</code>
-                    🔔 <b>Status:</b> Live student attendance alerts are active.
+                    👤 <b>ឈ្មោះ (Name):</b> Koy Dara
+                    🆔 <b>កូដសម្គាល់ (Code):</b> <code>3</code>
+                    🏷️ <b>ប្រភេទ (Category):</b> 🎓 សិស្ស (Student)
+                    ℹ️ <b>ព័ត៌មានបន្ថែម:</b> ថ្នាក់ (Class): Grade 7 - Class 7A
+                    ⚡ <b>ស្ថានភាព (State):</b> 🟢 ចូល (Check In)
+                    ⏱️ <b>វិន័យម៉ោង (Punctuality):</b> ✅ <b>ទៀងទាត់ (On Time)</b>
+                    ⏰ <b>ពេលវេលា (Time):</b> <code>%s</code>
+                    📍 <b>សាខា (Branch):</b> Phnom Penh Main Campus
+                    📟 <b>ម៉ាស៊ីន (Device):</b> ZKTeco Terminal (201)
+                    ━━━━━━━━━━━━━━━━━━━━━
+                    🔔 <b>Status:</b> Live student punch & late/early alerts active.
                     """.formatted(nowStr);
-            return sendRawMessageToChat(getStudentChatId(), msg);
+            return sendRawMessageToChat(chatId, msg);
         } else if ("staff".equalsIgnoreCase(target)) {
             String msg = """
-                    💼 <b>Enterprise Attendance System - Staffs Group</b>
+                    💼 <b>[STAFF ATTENDANCE] វត្តមានបុគ្គលិក (Test)</b>
                     ✅ <b>Telegram Bot Connected Successfully!</b>
                     ━━━━━━━━━━━━━━━━━━━━━
-                    🏢 <b>Channel:</b> ក្រុមបុគ្គលិកទូទៅ (Staff & Administration)
-                    🕒 <b>Timestamp:</b> <code>%s</code>
-                    🔔 <b>Status:</b> Live staff punch alerts are active.
+                    👤 <b>ឈ្មោះ (Name):</b> Lanh Sopha
+                    🆔 <b>កូដសម្គាល់ (Code):</b> <code>2</code>
+                    🏷️ <b>ប្រភេទ (Category):</b> 💼 បុគ្គលិក (Staff)
+                    ℹ️ <b>ព័ត៌មានបន្ថែម:</b> ផ្នែក: Information Technology
+                    ⚡ <b>ស្ថានភាព (State):</b> 🟢 ចូល (Check In)
+                    ⏱️ <b>វិន័យម៉ោង (Punctuality):</b> ⚠️ <b>យឺត 256 នាទី (Late +256m)</b>
+                    ⏰ <b>ពេលវេលា (Time):</b> <code>%s</code>
+                    📍 <b>សាខា (Branch):</b> FBIS-2
+                    📟 <b>ម៉ាស៊ីន (Device):</b> ZKTeco Terminal (202)
+                    ━━━━━━━━━━━━━━━━━━━━━
+                    🔔 <b>Status:</b> Live staff punch & late/early alerts active.
                     """.formatted(nowStr);
             return sendRawMessageToChat(getStaffChatId(), msg);
         } else if (target != null && !target.isBlank() && !"all".equalsIgnoreCase(target)) {
-            // Check custom group by id or name
+            // 1. Check custom group by id or name
             List<CustomTelegramGroup> customs = getCustomGroups();
             Optional<CustomTelegramGroup> matched = customs.stream()
                     .filter(g -> target.equalsIgnoreCase(g.getId()) || target.equalsIgnoreCase(g.getName()))
@@ -282,6 +376,33 @@ public class TelegramNotificationService {
                                 escapeHtml(grp.getName()),
                                 escapeHtml(grp.getTarget()),
                                 nowStr
+                        );
+                return sendRawMessageToChat(grp.getChatId(), msg);
+            }
+
+            // 2. Check student class group by id or className
+            List<StudentClassTelegramGroup> classGroups = getStudentClassGroups();
+            Optional<StudentClassTelegramGroup> matchedClass = classGroups.stream()
+                    .filter(g -> target.equalsIgnoreCase(g.getId())
+                            || target.equalsIgnoreCase(g.getClassName())
+                            || target.equalsIgnoreCase("class_" + g.getClassName())
+                            || target.equalsIgnoreCase("class_" + g.getId()))
+                    .findFirst();
+
+            if (matchedClass.isPresent()) {
+                StudentClassTelegramGroup grp = matchedClass.get();
+                String msg = """
+                        🎓 <b>[CLASS ATTENDANCE] វត្តមានសិស្សថ្នាក់ %s (Test)</b>
+                        ✅ <b>Class Telegram Group Connected Successfully!</b>
+                        ━━━━━━━━━━━━━━━━━━━━━
+                        🏫 <b>ថ្នាក់ (Class):</b> %s
+                        🕒 <b>កាលបរិច្ឆេទ (Timestamp):</b> <code>%s</code>
+                        🔔 <b>Status:</b> Live attendance alerts for %s are active.
+                        """.formatted(
+                                escapeHtml(grp.getClassName()),
+                                escapeHtml(grp.getClassName()),
+                                nowStr,
+                                escapeHtml(grp.getClassName())
                         );
                 return sendRawMessageToChat(grp.getChatId(), msg);
             }
@@ -331,23 +452,20 @@ public class TelegramNotificationService {
         if (!isEnabled()) return;
 
         String pType = personnelType != null ? personnelType.toUpperCase() : "STAFF";
-        String targetChatId;
+        String targetChatId = null;
         String headerTitle;
         String categoryBadge;
 
         if ("TEACHER".equalsIgnoreCase(pType)) {
-            if (!isNotifyTeacher()) return;
-            targetChatId = getTeacherChatId();
+            targetChatId = isNotifyTeacher() ? getTeacherChatId() : null;
             headerTitle = "👨‍🏫 <b>[TEACHER ATTENDANCE] វត្តមានលោកគ្រូ-អ្នកគ្រូ</b>";
             categoryBadge = "👨‍🏫 គ្រូបង្រៀន (Teacher)";
         } else if ("STUDENT".equalsIgnoreCase(pType)) {
-            if (!isNotifyStudent()) return;
-            targetChatId = getStudentChatId();
+            targetChatId = isNotifyStudent() ? getStudentChatId() : null;
             headerTitle = "🎓 <b>[STUDENT ATTENDANCE] វត្តមានសិស្សានុសិស្ស</b>";
             categoryBadge = "🎓 សិស្ស (Student)";
         } else {
-            if (!isNotifyStaff()) return;
-            targetChatId = getStaffChatId();
+            targetChatId = isNotifyStaff() ? getStaffChatId() : null;
             headerTitle = "💼 <b>[STAFF ATTENDANCE] វត្តមានបុគ្គលិក</b>";
             categoryBadge = "💼 បុគ្គលិក (Staff)";
         }
@@ -363,6 +481,128 @@ public class TelegramNotificationService {
             default -> "⚡ " + stateStr;
         };
 
+        // Determine punctuality (Late or Early Leave)
+        int lateMinutes = 0;
+        int earlyLeaveMinutes = 0;
+        int overtimeMinutes = 0;
+
+        LocalDate punchDate = TimeUtils.toPhnomPenhLocalDate(punchTime != null ? punchTime : Instant.now());
+        LocalTime punchLocalTime = TimeUtils.toPhnomPenhLocalTime(punchTime != null ? punchTime : Instant.now());
+
+        // 1. Try to fetch existing computed AttendanceRecord first (most authoritative)
+        AttendanceRecord attRecord = null;
+        try {
+            if ("STUDENT".equalsIgnoreCase(pType)) {
+                Optional<Student> sOpt = studentRepository.findByStudentCodeAndDeletedAtIsNull(code);
+                if (sOpt.isPresent()) {
+                    attRecord = attendanceRecordRepository.findByStudentIdAndAttendanceDate(sOpt.get().getId(), punchDate).orElse(null);
+                }
+            } else {
+                Optional<Employee> eOpt = employeeRepository.findByEmployeeCodeAndDeletedAtIsNull(code);
+                if (eOpt.isPresent()) {
+                    attRecord = attendanceRecordRepository.findByEmployeeIdAndAttendanceDate(eOpt.get().getId(), punchDate).orElse(null);
+                }
+            }
+        } catch (Exception ex) {
+            log.debug("Note looking up attendance record for Telegram alert: {}", ex.getMessage());
+        }
+
+        if (attRecord != null) {
+            lateMinutes = attRecord.getLateMinutes();
+            earlyLeaveMinutes = attRecord.getEarlyLeaveMinutes();
+            overtimeMinutes = attRecord.getOvertimeMinutes();
+        }
+
+        // Determine Shift schedule for punctuality checks
+        Shift shift = null;
+        try {
+            if ("STUDENT".equalsIgnoreCase(pType)) {
+                Optional<Student> sOpt = studentRepository.findByStudentCodeAndDeletedAtIsNull(code);
+                if (sOpt.isPresent()) {
+                    List<EmployeeSchedule> scheds = scheduleRepository.findActiveStudentSchedules(sOpt.get().getId(), punchDate);
+                    if (!scheds.isEmpty()) shift = scheds.get(0).getShift();
+                }
+            } else {
+                Optional<Employee> eOpt = employeeRepository.findByEmployeeCodeAndDeletedAtIsNull(code);
+                if (eOpt.isPresent()) {
+                    List<EmployeeSchedule> scheds = scheduleRepository.findActiveSchedules(eOpt.get().getId(), punchDate);
+                    if (!scheds.isEmpty()) shift = scheds.get(0).getShift();
+                }
+            }
+        } catch (Exception ex) {
+            log.debug("Note looking up schedule for Telegram: {}", ex.getMessage());
+        }
+
+        if (shift == null) {
+            shift = shiftRepository.findByCode("SHIFT_MORNING")
+                    .orElseGet(() -> shiftRepository.findAll().stream().findFirst().orElse(null));
+        }
+
+        boolean isCheckIn = "CHECK_IN".equalsIgnoreCase(stateStr) || "BREAK_IN".equalsIgnoreCase(stateStr);
+        boolean isCheckOut = "CHECK_OUT".equalsIgnoreCase(stateStr) || "BREAK_OUT".equalsIgnoreCase(stateStr);
+
+        LocalTime breakStart = shift != null && shift.getBreakStart() != null ? shift.getBreakStart() : LocalTime.of(12, 0);
+        LocalTime breakEnd = shift != null && shift.getBreakEnd() != null ? shift.getBreakEnd() : LocalTime.of(14, 0);
+        LocalTime shiftStart = shift != null && shift.getStartTime() != null ? shift.getStartTime() : LocalTime.of(7, 0);
+        LocalTime shiftEnd = shift != null && shift.getEndTime() != null ? shift.getEndTime() : LocalTime.of(17, 0);
+        int graceLate = shift != null ? shift.getGraceLateMinutes() : 15;
+        int graceEarly = shift != null ? shift.getGraceEarlyLeaveMinutes() : 15;
+
+        // Classify shift phase: Shift 1 vs Shift 2
+        boolean isMorningPhase = punchLocalTime.isBefore(breakEnd);
+        String detailedState;
+        String punctualityText;
+
+        if (isCheckIn) {
+            if (isMorningPhase) {
+                detailedState = "🌅 ចូលវេនទី១ (Shift 1 In)";
+                if (punchLocalTime.isAfter(shiftStart.plusMinutes(graceLate))) {
+                    lateMinutes = (int) Duration.between(shiftStart, punchLocalTime).toMinutes();
+                    punctualityText = "⚠️ <b>យឺត " + lateMinutes + " នាទី (Shift 1 Late +" + lateMinutes + "m)</b>";
+                } else {
+                    punctualityText = "✅ <b>ទៀងទាត់ (Shift 1 On Time)</b>";
+                }
+            } else {
+                detailedState = "🌆 ចូលវេនទី២ (Shift 2 In / Resume)";
+                if (punchLocalTime.isAfter(breakEnd.plusMinutes(graceLate))) {
+                    lateMinutes = (int) Duration.between(breakEnd, punchLocalTime).toMinutes();
+                    punctualityText = "⚠️ <b>យឺត " + lateMinutes + " នាទី (Shift 2 Late +" + lateMinutes + "m)</b>";
+                } else {
+                    punctualityText = "✅ <b>ទៀងទាត់ (Shift 2 On Time)</b>";
+                }
+            }
+        } else if (isCheckOut) {
+            if (isMorningPhase && shift != null && shift.getBreakStart() != null) {
+                detailedState = "🍱 ចេញសម្រាកវេនទី១ (Shift 1 Lunch Out)";
+                if (punchLocalTime.isBefore(breakStart.minusMinutes(graceEarly))) {
+                    earlyLeaveMinutes = (int) Duration.between(punchLocalTime, breakStart).toMinutes();
+                    punctualityText = "⚠️ <b>ចេញមុន " + earlyLeaveMinutes + " នាទី (Shift 1 Early Leave -" + earlyLeaveMinutes + "m)</b>";
+                } else {
+                    punctualityText = "🍱 <b>ចេញសម្រាកត្រឹមត្រូវ (Lunch Out)</b>";
+                }
+            } else {
+                detailedState = "🏁 ចេញវេនទី២ (Shift 2 Out / End Day)";
+                if (punchLocalTime.isBefore(shiftEnd.minusMinutes(graceEarly))) {
+                    earlyLeaveMinutes = (int) Duration.between(punchLocalTime, shiftEnd).toMinutes();
+                    punctualityText = "⚠️ <b>ចេញមុន " + earlyLeaveMinutes + " នាទី (Shift 2 Early Leave -" + earlyLeaveMinutes + "m)</b>";
+                } else if (punchLocalTime.isAfter(shiftEnd)) {
+                    overtimeMinutes = (int) Duration.between(shiftEnd, punchLocalTime).toMinutes();
+                    punctualityText = "⏳ <b>ថែមម៉ោង " + overtimeMinutes + " នាទី (Overtime +" + overtimeMinutes + "m)</b>";
+                } else {
+                    punctualityText = "✅ <b>ទៀងទាត់ (Shift 2 On Time)</b>";
+                }
+            }
+        } else {
+            detailedState = "⚡ " + stateStr;
+            punctualityText = "✅ <b>ទៀងទាត់ (On Time)</b>";
+        }
+
+        // Check if tenant requested only late / early departure notifications
+        if (isNotifyLateOnly() && lateMinutes <= 0 && earlyLeaveMinutes <= 0) {
+            log.info("Telegram notification skipped for {} ({}): Arrival on time and 'notifyLateOnly' is enabled", name, code);
+            return;
+        }
+
         StringBuilder sb = new StringBuilder();
         sb.append(headerTitle).append("\n");
         sb.append("━━━━━━━━━━━━━━━━━━━━━\n");
@@ -374,7 +614,8 @@ public class TelegramNotificationService {
             sb.append("ℹ️ <b>ព័ត៌មានបន្ថែម:</b> ").append(escapeHtml(extraDetail)).append("\n");
         }
 
-        sb.append("⚡ <b>ស្ថានភាព (State):</b> ").append(stateText).append("\n");
+        sb.append("⚡ <b>ស្ថានភាព (State):</b> ").append(detailedState).append("\n");
+        sb.append("⏱️ <b>វិន័យម៉ោង (Punctuality):</b> ").append(punctualityText).append("\n");
         sb.append("⏰ <b>ពេលវេលា (Time):</b> <code>").append(TimeUtils.formatPhnomPenh(punchTime != null ? punchTime : Instant.now())).append("</code>\n");
         sb.append("📍 <b>សាខា (Branch):</b> ").append(escapeHtml(branch != null ? branch : "Main Branch")).append("\n");
         sb.append("📟 <b>ម៉ាស៊ីន (Device):</b> ").append(escapeHtml(device != null ? device : "ZKTeco Terminal")).append("\n");
@@ -382,10 +623,12 @@ public class TelegramNotificationService {
         sb.append("🏢 <i>ZKTeco Multi-Branch Smart Biometrics</i>");
 
         String formattedMessage = sb.toString();
+        int sentCount = 0;
 
         // 1. Send to core group
         if (targetChatId != null && !targetChatId.isBlank()) {
             sendRawMessageToChat(targetChatId, formattedMessage);
+            sentCount++;
         }
 
         // 2. Also dispatch to any matching Custom Dynamic Telegram Groups
@@ -402,8 +645,39 @@ public class TelegramNotificationService {
 
             if (matches) {
                 sendRawMessageToChat(cg.getChatId(), formattedMessage);
+                sentCount++;
             }
         }
+
+        // 3. Dispatch to Student Class Telegram Groups (manual class-by-class assignment)
+        if ("STUDENT".equalsIgnoreCase(pType)) {
+            String studentClass = null;
+            try {
+                Optional<Student> sOpt = studentRepository.findByStudentCodeAndDeletedAtIsNull(code);
+                if (sOpt.isPresent() && sOpt.get().getClassName() != null) {
+                    studentClass = sOpt.get().getClassName().trim();
+                } else if (extraDetail != null && extraDetail.contains("Class):")) {
+                    studentClass = extraDetail.substring(extraDetail.indexOf("Class):") + 7).trim();
+                }
+            } catch (Exception ex) {
+                log.debug("Note looking up student class for Telegram: {}", ex.getMessage());
+            }
+
+            if (studentClass != null && !studentClass.isBlank()) {
+                List<StudentClassTelegramGroup> classGroups = getStudentClassGroups();
+                for (StudentClassTelegramGroup scg : classGroups) {
+                    if (scg.isEnabled() && scg.getChatId() != null && !scg.getChatId().isBlank()
+                            && scg.getClassName() != null
+                            && (scg.getClassName().trim().equalsIgnoreCase(studentClass) ||
+                                scg.getClassName().trim().equalsIgnoreCase("Class " + studentClass) ||
+                                studentClass.equalsIgnoreCase("Class " + scg.getClassName().trim()))) {
+                        sendRawMessageToChat(scg.getChatId(), formattedMessage);
+                        sentCount++;
+                    }
+                }
+            }
+        }
+        log.info("Telegram punch notification for {} ({}): dispatched to {} group(s)", name, code, sentCount);
     }
 
     @Async

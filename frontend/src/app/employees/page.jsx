@@ -15,17 +15,24 @@ import {
   UserCheck,
   UserX,
   Camera,
+  Activity,
+  GitFork,
+  Clock,
+  AlertTriangle,
 } from "lucide-react";
+import Link from "next/link";
 import api from "@/lib/api";
 import { formatDate } from "@/lib/utils";
 import Portal from "@/components/common/Portal";
 import ImageUploadDropzone from "@/components/common/ImageUploadDropzone";
 import WebcamFaceEnrollModal from "@/components/biometrics/WebcamFaceEnrollModal";
+import KhmerPhoneInput from "@/components/common/KhmerPhoneInput";
 
 export default function EmployeesPage() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [departmentId, setDepartmentId] = useState("");
+  const [branchId, setBranchId] = useState("");
   const [status, setStatus] = useState("");
   const [showModal, setShowModal] = useState(false);
   const [editingEmployeeId, setEditingEmployeeId] = useState(null);
@@ -33,6 +40,7 @@ export default function EmployeesPage() {
 
   const initialForm = {
     employeeCode: "",
+    idNumber: "",
     englishName: "",
     khmerName: "",
     gender: "MALE",
@@ -45,20 +53,72 @@ export default function EmployeesPage() {
     employmentStartDate: new Date().toISOString().split("T")[0],
     employmentStatus: "ACTIVE",
     profileImageUrl: "",
+    shiftId: "",
   };
 
   const [formData, setFormData] = useState(initialForm);
+  const [loadingNextCode, setLoadingNextCode] = useState(false);
+  const [batchYear, setBatchYear] = useState("26");
+  const [loadingNextId, setLoadingNextId] = useState(false);
 
-  const openCreateModal = () => {
+  const fetchNextEmployeeCode = async () => {
+    setLoadingNextCode(true);
+    try {
+      const res = await api.get("/api/v1/employees/next-code");
+      if (res.data?.data?.nextCode) {
+        setFormData((prev) => ({ ...prev, employeeCode: res.data.data.nextCode }));
+      }
+    } catch (err) {
+      console.warn("Failed to fetch next employee code", err);
+    } finally {
+      setLoadingNextCode(false);
+    }
+  };
+
+  const fetchNextEmployeeId = async (yr) => {
+    const yearToFetch = yr !== undefined ? yr : batchYear;
+    setLoadingNextId(true);
+    try {
+      const res = await api.get(`/api/v1/employees/next-id-number?staffType=EMPLOYEE&year=${yearToFetch}`);
+      if (res.data?.data?.nextIdNumber) {
+        setFormData((prev) => ({ ...prev, idNumber: res.data.data.nextIdNumber }));
+      }
+    } catch (err) {
+      console.warn("Failed to fetch next employee ID", err);
+    } finally {
+      setLoadingNextId(false);
+    }
+  };
+
+  const handleYearChange = (yr) => {
+    const cleaned = yr.replace(/\D/g, "").slice(-2);
+    setBatchYear(cleaned);
+    if (cleaned.length >= 1) {
+      fetchNextEmployeeId(cleaned);
+    }
+  };
+
+  const openCreateModal = async () => {
     setEditingEmployeeId(null);
+    const initialYear = "26";
+    setBatchYear(initialYear);
     setFormData(initialForm);
     setShowModal(true);
+    await Promise.all([fetchNextEmployeeCode(), fetchNextEmployeeId(initialYear)]);
   };
 
   const openEditModal = (emp) => {
     setEditingEmployeeId(emp.id);
+    let extractedYear = "26";
+    if (emp.idNumber && emp.idNumber.match(/^FBISS(\d{2})/i)) {
+      extractedYear = emp.idNumber.match(/^FBISS(\d{2})/i)[1];
+    } else if (emp.employmentStartDate) {
+      extractedYear = emp.employmentStartDate.slice(2, 4);
+    }
+    setBatchYear(extractedYear);
     setFormData({
       employeeCode: emp.employeeCode || "",
+      idNumber: emp.idNumber || "",
       englishName: emp.englishName || "",
       khmerName: emp.khmerName || "",
       gender: emp.gender || "MALE",
@@ -99,10 +159,26 @@ export default function EmployeesPage() {
     },
   });
 
+  const { data: shifts = [] } = useQuery({
+    queryKey: ["all-shifts"],
+    queryFn: async () => {
+      const res = await api.get("/api/v1/shifts");
+      return res.data?.data || [];
+    },
+  });
+
+  const { data: unassignedSummary, refetch: refetchSummary } = useQuery({
+    queryKey: ["unassigned-summary"],
+    queryFn: async () => {
+      const res = await api.get("/api/v1/schedules/unassigned-summary");
+      return res.data?.data;
+    },
+  });
+
   const { data: allEmployeesCountData } = useQuery({
     queryKey: ["all-employees-count"],
     queryFn: async () => {
-      const res = await api.get("/api/v1/employees?size=1");
+      const res = await api.get("/api/v1/employees?staffType=EMPLOYEE&size=1");
       return res.data?.data?.totalElements || 0;
     },
   });
@@ -110,16 +186,17 @@ export default function EmployeesPage() {
   const { data: activeEmployeesCountData } = useQuery({
     queryKey: ["active-employees-count"],
     queryFn: async () => {
-      const res = await api.get("/api/v1/employees?status=ACTIVE&size=1");
+      const res = await api.get("/api/v1/employees?staffType=EMPLOYEE&status=ACTIVE&size=1");
       return res.data?.data?.totalElements || 0;
     },
   });
 
   const { data: employeesData, isLoading, refetch } = useQuery({
-    queryKey: ["employees", search, departmentId, status],
+    queryKey: ["employees", search, departmentId, branchId, status],
     queryFn: async () => {
-      let url = `/api/v1/employees?search=${encodeURIComponent(search)}`;
+      let url = `/api/v1/employees?staffType=EMPLOYEE&search=${encodeURIComponent(search)}`;
       if (departmentId) url += `&departmentId=${departmentId}`;
+      if (branchId) url += `&branchId=${branchId}`;
       if (status) url += `&status=${status}`;
       const res = await api.get(url);
       return res.data?.data;
@@ -131,11 +208,17 @@ export default function EmployeesPage() {
 
   const createMutation = useMutation({
     mutationFn: async (payload) => {
-      const res = await api.post("/api/v1/employees", payload);
+      const res = await api.post("/api/v1/employees", {
+        ...payload,
+        staffType: "EMPLOYEE",
+        isTeacher: false,
+      });
       return res.data?.data;
     },
     onSuccess: () => {
       queryClient.invalidateQueries(["employees"]);
+      queryClient.invalidateQueries(["all-employees-count"]);
+      queryClient.invalidateQueries(["active-employees-count"]);
       setShowModal(false);
       setFormData(initialForm);
     },
@@ -146,11 +229,17 @@ export default function EmployeesPage() {
 
   const updateMutation = useMutation({
     mutationFn: async (payload) => {
-      const res = await api.put(`/api/v1/employees/${editingEmployeeId}`, payload);
+      const res = await api.put(`/api/v1/employees/${editingEmployeeId}`, {
+        ...payload,
+        staffType: "EMPLOYEE",
+        isTeacher: false,
+      });
       return res.data?.data;
     },
     onSuccess: () => {
       queryClient.invalidateQueries(["employees"]);
+      queryClient.invalidateQueries(["all-employees-count"]);
+      queryClient.invalidateQueries(["active-employees-count"]);
       setShowModal(false);
       setEditingEmployeeId(null);
       setFormData(initialForm);
@@ -165,6 +254,8 @@ export default function EmployeesPage() {
     try {
       await api.delete(`/api/v1/employees/${id}`);
       queryClient.invalidateQueries(["employees"]);
+      queryClient.invalidateQueries(["all-schedules"]);
+      queryClient.invalidateQueries(["unassigned-summary"]);
     } catch (err) {
       alert("Error: " + err.message);
     }
@@ -234,42 +325,89 @@ export default function EmployeesPage() {
         </div>
       </div>
 
+      {/* Schedule Alert Banner */}
+      {unassignedSummary?.unassignedEmployeesCount > 0 && (
+        <div className="bg-amber-50/90 dark:bg-amber-950/40 border border-amber-200/90 dark:border-amber-800 rounded-2xl p-4 shadow-xs text-amber-950 dark:text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-in fade-in duration-300">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-amber-100 dark:bg-amber-900/60 text-amber-700 dark:text-amber-300 flex items-center justify-center shrink-0">
+              <AlertTriangle size={20} />
+            </div>
+            <div>
+              <h4 className="font-bold text-sm text-amber-900 dark:text-amber-200">
+                Schedule Assignment Alert: {unassignedSummary.unassignedEmployeesCount} Employee{unassignedSummary.unassignedEmployeesCount > 1 ? "s" : ""} Unassigned
+              </h4>
+              <p className="text-xs text-amber-800/90 dark:text-amber-300/90 mt-0.5">
+                Staff without an assigned shift schedule cannot calculate attendance, late arrival, or work hours accurately.
+              </p>
+            </div>
+          </div>
+          <Link
+            href="/schedules"
+            className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-xl text-xs transition-colors shadow-xs shrink-0 flex items-center gap-1.5"
+          >
+            <span>Assign Schedules &rarr;</span>
+          </Link>
+        </div>
+      )}
+
       {/* Filter Bar */}
       <div className="flex flex-wrap items-center justify-between gap-4 p-3 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
         <div className="flex flex-wrap items-center gap-3 flex-1">
-          <div className="relative flex-1 min-w-[200px] max-w-sm">
-            <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+          <div className="h-10 flex items-center gap-2.5 flex-1 min-w-[200px] max-w-sm px-3.5 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus-within:ring-2 focus-within:ring-indigo-500/30 focus-within:border-indigo-500 dark:focus-within:border-indigo-400 transition-all">
+            <Search size={16} className="text-slate-400 dark:text-slate-500 shrink-0 pointer-events-none select-none" />
             <input
               type="text"
               placeholder="Search by code, name, or email..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-full pl-9 pr-4 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border-none text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              className="w-full bg-transparent border-none text-xs text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:ring-0 font-medium p-0 leading-normal"
             />
           </div>
 
-          <select
-            value={departmentId}
-            onChange={(e) => setDepartmentId(e.target.value)}
-            className="px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          >
-            <option value="">All Departments</option>
-            {departments?.map((d) => (
-              <option key={d.id} value={d.id}>{d.name}</option>
-            ))}
-          </select>
+          <div className="h-10 flex items-center gap-2 px-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus-within:ring-2 focus-within:ring-indigo-500/30 focus-within:border-indigo-500 transition-all">
+            <Building2 size={15} className="text-slate-400 shrink-0 pointer-events-none" />
+            <select
+              value={departmentId}
+              onChange={(e) => setDepartmentId(e.target.value)}
+              className="bg-transparent border-none text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-0 font-semibold cursor-pointer p-0 leading-normal"
+            >
+              <option value="" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">All Departments</option>
+              {departments?.map((d) => (
+                <option key={d.id} value={d.id} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">{d.name}</option>
+              ))}
+            </select>
+          </div>
 
-          <select
-            value={status}
-            onChange={(e) => setStatus(e.target.value)}
-            className="px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          >
-            <option value="">All Statuses</option>
-            <option value="ACTIVE">Active</option>
-            <option value="PROBATION">Probation</option>
-            <option value="SUSPENDED">Suspended</option>
-            <option value="TERMINATED">Terminated</option>
-          </select>
+          <div className="h-10 flex items-center gap-2 px-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus-within:ring-2 focus-within:ring-indigo-500/30 focus-within:border-indigo-500 transition-all">
+            <Activity size={15} className="text-slate-400 shrink-0 pointer-events-none" />
+            <select
+              value={status}
+              onChange={(e) => setStatus(e.target.value)}
+              className="bg-transparent border-none text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-0 font-semibold cursor-pointer p-0 leading-normal"
+            >
+              <option value="" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">All Statuses</option>
+              <option value="ACTIVE" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Active</option>
+              <option value="PROBATION" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Probation</option>
+              <option value="SUSPENDED" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Suspended</option>
+              <option value="TERMINATED" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Terminated</option>
+            </select>
+          </div>
+
+          <div className="h-10 flex items-center gap-2 px-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus-within:ring-2 focus-within:ring-indigo-500/30 focus-within:border-indigo-500 transition-all">
+            <GitFork size={15} className="text-slate-400 shrink-0 pointer-events-none" />
+            <select
+              value={branchId}
+              onChange={(e) => setBranchId(e.target.value)}
+              className="bg-transparent border-none text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-0 font-semibold cursor-pointer p-0 leading-normal"
+            >
+              <option value="" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">All Branches (គ្រប់សាខា)</option>
+              {branches?.map((b) => (
+                <option key={b.id} value={b.id} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">
+                  📍 {b.name} ({b.code})
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
 
         <button
@@ -294,8 +432,11 @@ export default function EmployeesPage() {
             <thead>
               <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-50/75 dark:bg-slate-800/40 text-slate-500 dark:text-slate-400 font-semibold uppercase tracking-wider">
                 <th className="py-3 px-4">Employee</th>
-                <th className="py-3 px-4">Code</th>
+                <th className="py-3 px-4">Staff ID (អត្តលេខ)</th>
+                <th className="py-3 px-4">Code / PIN</th>
                 <th className="py-3 px-4">Department & Position</th>
+                <th className="py-3 px-4">Branch (សាខា)</th>
+                <th className="py-3 px-4">Shift / Schedule</th>
                 <th className="py-3 px-4">Contact</th>
                 <th className="py-3 px-4">Start Date</th>
                 <th className="py-3 px-4">Status</th>
@@ -305,11 +446,11 @@ export default function EmployeesPage() {
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
               {isLoading ? (
                 <tr>
-                  <td colSpan={7} className="py-8 text-center text-slate-400">Loading employees...</td>
+                  <td colSpan={10} className="py-8 text-center text-slate-400">Loading employees...</td>
                 </tr>
               ) : employeesData?.content?.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-12 text-center text-slate-400">
+                  <td colSpan={10} className="py-12 text-center text-slate-400">
                     <Users size={32} className="mx-auto mb-2 opacity-50" />
                     <p className="font-semibold">No employees found</p>
                     <p className="text-[11px]">Click "Add Employee" to register staff.</p>
@@ -337,12 +478,42 @@ export default function EmployeesPage() {
                           </div>
                         </div>
                       </td>
-                      <td className="py-3 px-4 font-mono font-medium text-slate-700 dark:text-slate-300">
-                        {emp.employeeCode}
+                      <td className="py-3 px-4">
+                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-lg text-xs font-bold font-mono bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">
+                          {emp.idNumber || ("FBISS" + String(emp.employeeCode).padStart(4, "0"))}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4">
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-bold font-mono bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700">
+                          PIN: {emp.employeeCode}
+                        </span>
                       </td>
                       <td className="py-3 px-4">
                         <span className="font-semibold text-slate-900 dark:text-white block">{emp.departmentName || "General"}</span>
                         <span className="text-[11px] text-slate-400">{emp.positionTitle || "Staff"}</span>
+                      </td>
+                      <td className="py-3 px-4">
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800/60 whitespace-nowrap">
+                          <GitFork size={12} className="text-indigo-500 shrink-0" />
+                          <span>{emp.branchName || "Branch 1"}</span>
+                        </span>
+                      </td>
+                      <td className="py-3 px-4">
+                        {emp.scheduleAssigned ? (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 whitespace-nowrap">
+                            <Clock size={11} className="text-emerald-500 shrink-0" />
+                            <span>{emp.currentShiftName || "Assigned"}</span>
+                          </span>
+                        ) : (
+                          <Link
+                            href="/schedules"
+                            className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 border border-amber-300 dark:border-amber-700 hover:bg-amber-100 transition-colors whitespace-nowrap"
+                            title="Click to assign schedule"
+                          >
+                            <AlertTriangle size={11} className="text-amber-600 shrink-0" />
+                            <span>Not Assigned</span>
+                          </Link>
+                        )}
                       </td>
                       <td className="py-3 px-4 text-[11px] text-slate-600 dark:text-slate-400">
                         <div>{emp.email || "-"}</div>
@@ -445,23 +616,95 @@ export default function EmployeesPage() {
                     />
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">
-                    Employee Code / Terminal User ID (Numeric) *
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="font-semibold text-slate-700 dark:text-slate-300">
+                      Staff ID (អត្តលេខ)
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => fetchNextEmployeeId(batchYear)}
+                      disabled={loadingNextId}
+                      className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
+                      title="Calculate next sequential ID for chosen year"
+                    >
+                      <RefreshCw size={11} className={loadingNextId ? "animate-spin" : ""} />
+                      <span>{loadingNextId ? "Generating..." : "Auto ID"}</span>
+                    </button>
+                  </div>
+
+                  {/* Batch Year Selector Chips */}
+                  <div className="flex items-center gap-1.5 mb-1.5">
+                    <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">Year:</span>
+                    {["25", "26", "27", "28"].map((yr) => (
+                      <button
+                        key={yr}
+                        type="button"
+                        onClick={() => handleYearChange(yr)}
+                        className={`px-2 py-0.5 rounded-md text-xs font-bold transition-all cursor-pointer ${
+                          batchYear === yr
+                            ? "bg-indigo-600 text-white shadow-sm"
+                            : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700"
+                        }`}
+                      >
+                        {yr}
+                      </button>
+                    ))}
+                    <input
+                      type="text"
+                      maxLength={2}
+                      placeholder="YY"
+                      value={batchYear}
+                      onChange={(e) => handleYearChange(e.target.value)}
+                      className="w-10 px-1 py-0.5 text-xs text-center rounded-md bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 font-bold text-slate-800 dark:text-white"
+                      title="Custom 2-digit Year (e.g. 24, 25, 26, 27)"
+                    />
+                  </div>
+
+                  <input
+                    type="text"
+                    placeholder="e.g. FBISS260001"
+                    value={formData.idNumber}
+                    onChange={(e) => setFormData({ ...formData, idNumber: e.target.value.toUpperCase() })}
+                    className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono font-bold text-slate-900 dark:text-white"
+                  />
+                  <p className="text-[10px] text-emerald-600 dark:text-emerald-400 mt-1 font-medium">
+                    ✓ Auto ID: FBISS + Year ({batchYear}) + 4-digit auto index ({formData.idNumber || `FBISS${batchYear}0001`})
+                  </p>
+                </div>
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="font-semibold text-slate-700 dark:text-slate-300 block">
+                      Code / Terminal PIN *
+                    </label>
+                    {!editingEmployeeId && (
+                      <button
+                        type="button"
+                        onClick={fetchNextEmployeeCode}
+                        disabled={loadingNextCode}
+                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
+                        title="Generate fresh unique PIN"
+                      >
+                        <RefreshCw size={11} className={loadingNextCode ? "animate-spin" : ""} />
+                        <span>{loadingNextCode ? "Generating..." : "Auto-Generated"}</span>
+                      </button>
+                    )}
+                  </div>
                   <input
                     type="text"
                     inputMode="numeric"
                     pattern="[0-9]*"
-                    required
-                    placeholder="e.g. 1001"
+                    placeholder="Auto-generated PIN (e.g. 1)"
                     value={formData.employeeCode}
                     onChange={(e) => setFormData({ ...formData, employeeCode: e.target.value.replace(/\D/g, "") })}
-                    className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono"
+                    className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono text-slate-900 dark:text-white"
                   />
-                  <p className="text-[10px] text-slate-400 mt-1">
-                    Numeric keypad PIN (0-9). Typed on the ZKTeco device to punch or enroll.
+                  <p className="text-[10px] text-emerald-600 dark:text-emerald-400 mt-1 font-medium flex items-center gap-1">
+                    ✓ Numeric PIN for biometric machines.
                   </p>
                 </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Gender *</label>
                   <select
@@ -472,6 +715,19 @@ export default function EmployeesPage() {
                     <option value="MALE">Male</option>
                     <option value="FEMALE">Female</option>
                     <option value="OTHER">Other</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Campus / Branch</label>
+                  <select
+                    value={formData.branchId}
+                    onChange={(e) => setFormData({ ...formData, branchId: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="">Select Branch</option>
+                    {branches?.map((b) => (
+                      <option key={b.id} value={b.id}>{b.name}</option>
+                    ))}
                   </select>
                 </div>
               </div>
@@ -513,12 +769,9 @@ export default function EmployeesPage() {
                 </div>
                 <div>
                   <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Phone Number</label>
-                  <input
-                    type="text"
-                    placeholder="+855 12 345 678"
+                  <KhmerPhoneInput
                     value={formData.phoneNumber}
-                    onChange={(e) => setFormData({ ...formData, phoneNumber: e.target.value })}
-                    className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    onChange={(val) => setFormData({ ...formData, phoneNumber: val })}
                   />
                 </div>
               </div>
@@ -554,16 +807,16 @@ export default function EmployeesPage() {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Campus / Branch</label>
+                  <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Employment Type</label>
                   <select
-                    value={formData.branchId}
-                    onChange={(e) => setFormData({ ...formData, branchId: e.target.value })}
+                    value={formData.employmentType}
+                    onChange={(e) => setFormData({ ...formData, employmentType: e.target.value })}
                     className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
-                    <option value="">Select Branch</option>
-                    {branches?.map((b) => (
-                      <option key={b.id} value={b.id}>{b.name}</option>
-                    ))}
+                    <option value="FULL_TIME">Full Time</option>
+                    <option value="PART_TIME">Part Time</option>
+                    <option value="CONTRACT">Contract</option>
+                    <option value="INTERN">Intern</option>
                   </select>
                 </div>
                 <div>
@@ -576,6 +829,21 @@ export default function EmployeesPage() {
                     className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   />
                 </div>
+              </div>
+
+              <div>
+                <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Assigned Shift / Schedule (វេនធ្វើការ)</label>
+                <select
+                  value={formData.shiftId}
+                  onChange={(e) => setFormData({ ...formData, shiftId: e.target.value })}
+                  className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-xs text-slate-900 dark:text-white"
+                >
+                  <option value="">Select Shift (Optional)</option>
+                  {shifts?.map((s) => (
+                    <option key={s.id} value={s.id}>{s.name} ({s.startTime} - {s.endTime})</option>
+                  ))}
+                </select>
+                <p className="text-[10px] text-slate-400 mt-1">If selected, an active recurring shift schedule will automatically be created for this employee.</p>
               </div>
 
               </div>

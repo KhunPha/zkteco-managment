@@ -21,6 +21,7 @@ public class UserPrincipal implements UserDetails {
     private final Long id;
     private final String username;
     private final String email;
+    private final String companyCode;
     @JsonIgnore
     private final String password;
     private final boolean active;
@@ -44,6 +45,7 @@ public class UserPrincipal implements UserDetails {
                 .id(user.getId())
                 .username(user.getUsername())
                 .email(user.getEmail())
+                .companyCode(user.getCompanyCode() != null ? user.getCompanyCode() : "default")
                 .password(user.getPasswordHash())
                 .active(user.isActive())
                 .locked(user.isLocked())

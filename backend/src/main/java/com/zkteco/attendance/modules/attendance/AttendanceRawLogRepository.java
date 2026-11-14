@@ -17,5 +17,10 @@ public interface AttendanceRawLogRepository extends JpaRepository<AttendanceRawL
     List<AttendanceRawLog> findByProcessedFalseOrderByPunchTimeAsc();
     List<AttendanceRawLog> findByPunchTimeBetweenOrderByPunchTimeAsc(Instant start, Instant end);
     Page<AttendanceRawLog> findAllByOrderByPunchTimeDesc(Pageable pageable);
+    Page<AttendanceRawLog> findByCompanyCodeOrderByPunchTimeDesc(String companyCode, Pageable pageable);
+    List<AttendanceRawLog> findByCompanyCodeAndPunchTimeBetweenOrderByPunchTimeAsc(String companyCode, Instant start, Instant end);
+    long countByCompanyCodeAndPunchTimeBetween(String companyCode, Instant start, Instant end);
+    long countByPunchTimeBetween(Instant start, Instant end);
+    long countByCompanyCode(String companyCode);
 }
 

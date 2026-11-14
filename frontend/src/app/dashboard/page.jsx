@@ -236,17 +236,20 @@ export default function DashboardPage() {
           <div className="h-72 w-full">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={summary?.weeklyTrend || []}>
-                <CartesianGrid strokeDasharray="3 3" opacity={0.15} />
-                <XAxis dataKey="date" tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 11 }} />
+                <CartesianGrid strokeDasharray="3 3" opacity={0.15} stroke="#64748b" />
+                <XAxis dataKey="date" stroke="#94a3b8" tick={{ fill: "#94a3b8", fontSize: 11 }} />
+                <YAxis stroke="#94a3b8" tick={{ fill: "#94a3b8", fontSize: 11 }} />
                 <Tooltip
                   contentStyle={{
-                    backgroundColor: "rgba(15, 23, 42, 0.9)",
+                    backgroundColor: "rgba(15, 23, 42, 0.95)",
                     borderColor: "#334155",
                     borderRadius: "1rem",
-                    color: "#fff",
+                    color: "#f8fafc",
                     fontSize: "12px",
+                    boxShadow: "0 10px 25px -5px rgba(0,0,0,0.5)",
                   }}
+                  itemStyle={{ color: "#f8fafc" }}
+                  labelStyle={{ color: "#94a3b8", fontWeight: "bold" }}
                 />
                 <Legend />
                 <Area type="monotone" dataKey="present" name="Present" stroke="#10b981" fill="#10b981" fillOpacity={0.2} />
@@ -268,17 +271,20 @@ export default function DashboardPage() {
           <div className="h-72 w-full">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={summary?.departmentStats || []}>
-                <CartesianGrid strokeDasharray="3 3" opacity={0.15} />
-                <XAxis dataKey="departmentName" tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 11 }} />
+                <CartesianGrid strokeDasharray="3 3" opacity={0.15} stroke="#64748b" />
+                <XAxis dataKey="departmentName" stroke="#94a3b8" tick={{ fill: "#94a3b8", fontSize: 11 }} />
+                <YAxis stroke="#94a3b8" tick={{ fill: "#94a3b8", fontSize: 11 }} />
                 <Tooltip
                   contentStyle={{
-                    backgroundColor: "rgba(15, 23, 42, 0.9)",
+                    backgroundColor: "rgba(15, 23, 42, 0.95)",
                     borderColor: "#334155",
                     borderRadius: "1rem",
-                    color: "#fff",
+                    color: "#f8fafc",
                     fontSize: "12px",
+                    boxShadow: "0 10px 25px -5px rgba(0,0,0,0.5)",
                   }}
+                  itemStyle={{ color: "#f8fafc" }}
+                  labelStyle={{ color: "#94a3b8", fontWeight: "bold" }}
                 />
                 <Legend />
                 <Bar dataKey="employeeCount" name="Total Staff" fill="#94a3b8" radius={[6, 6, 0, 0]} />

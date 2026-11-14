@@ -11,6 +11,7 @@ public class CreateEmployeeRequest {
     private Long userId;
 
     private String employeeCode;
+    private String idNumber;
 
     private String khmerName;
 
@@ -39,5 +40,8 @@ public class CreateEmployeeRequest {
     private String profileImageUrl;
     private Long supervisorId;
     private String cardNumber;
+    private String staffType; // EMPLOYEE, TEACHER
+    private Boolean isTeacher;
+    private Long shiftId;
 }
 

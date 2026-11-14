@@ -9,8 +9,12 @@ import java.util.List;
 @Data
 public class BatchAssignScheduleRequest {
     private List<Long> employeeIds;
+    private List<Long> studentIds;
     private Long departmentId;
     private Long branchId;
+    private String className;
+    private String grade;
+    private String targetPersonnelType; // "EMPLOYEE", "TEACHER", "STUDENT", "ALL"
 
     @NotNull(message = "Shift ID is required")
     private Long shiftId;

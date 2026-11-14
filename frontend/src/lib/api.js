@@ -30,6 +30,8 @@ api.interceptors.request.use(
       if (token) {
         config.headers.Authorization = `Bearer ${token}`;
       }
+      const companyCode = localStorage.getItem("active_company_code") || "default";
+      config.headers["X-Company-Code"] = companyCode;
     }
     // Remove default application/json header for FormData so the browser automatically sets multipart/form-data with boundary
     if (config.data instanceof FormData) {

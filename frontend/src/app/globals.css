@@ -72,15 +72,15 @@
 }
 
 .dark {
-  --background: #0f172a;
+  --background: #020617;
   --foreground: #f8fafc;
-  --card: #1e293b;
+  --card: #0f172a;
   --card-foreground: #f8fafc;
   --primary: #6366f1;
   --primary-foreground: #ffffff;
-  --muted: #334155;
+  --muted: #1e293b;
   --muted-foreground: #94a3b8;
-  --border: #334155;
+  --border: #1e293b;
 }
 
 html,
@@ -122,6 +122,20 @@ select:disabled {
   cursor: not-allowed;
 }
 
+/* Native form color-scheme & calendar picker styling */
+html.dark {
+  color-scheme: dark;
+}
+html:not(.dark) {
+  color-scheme: light;
+}
+
+.dark input[type="date"]::-webkit-calendar-picker-indicator,
+.dark input[type="time"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.85);
+  cursor: pointer;
+}
+
 /* Custom scrollbars */
 ::-webkit-scrollbar {
   width: 6px;
@@ -136,6 +150,45 @@ select:disabled {
 }
 .dark ::-webkit-scrollbar-thumb {
   background: #475569;
+}
+
+/* Sidebar scroll area: zero horizontal scrollbar, invisible buttons, sleek clean scrolling */
+.sidebar-scroll-container,
+.sidebar-scroll-container * {
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+.sidebar-scroll-container {
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  max-width: 100% !important;
+}
+.sidebar-scroll-container::-webkit-scrollbar,
+.sidebar-scroll-container *::-webkit-scrollbar {
+  display: none !important;
+  width: 0px !important;
+  height: 0px !important;
+  background: transparent !important;
+}
+.sidebar-scroll-container::-webkit-scrollbar:horizontal {
+  display: none !important;
+  height: 0px !important;
+  width: 0px !important;
+  opacity: 0 !important;
+  visibility: hidden !important;
+}
+.sidebar-scroll-container::-webkit-scrollbar-track {
+  display: none !important;
+  background: transparent !important;
+}
+.sidebar-scroll-container::-webkit-scrollbar-thumb {
+  display: none !important;
+  background: transparent !important;
+}
+.sidebar-scroll-container::-webkit-scrollbar-button {
+  display: none !important;
+  width: 0px !important;
+  height: 0px !important;
 }
 
 /* Custom animation keyframes */
@@ -239,3 +292,23 @@ select:disabled {
   -ms-overflow-style: none;
   scrollbar-width: none;
 }
+
+/* ZKTeco Biometric Optical Scanner Laser Sweep Animation */
+@keyframes zk-laser-sweep {
+  0% {
+    top: 4%;
+    opacity: 0.5;
+  }
+  50% {
+    top: 88%;
+    opacity: 1;
+  }
+  100% {
+    top: 4%;
+    opacity: 0.5;
+  }
+}
+.animate-zk-laser {
+  animation: zk-laser-sweep 1.6s ease-in-out infinite;
+}
+

@@ -56,8 +56,23 @@ public class LeaveService {
     // Leave Requests
     @Transactional(readOnly = true)
     public PageResponse<LeaveRequestDto> getLeaveRequests(String status, Pageable pageable) {
-        String filterStatus = (status != null && !status.trim().isEmpty()) ? status.trim().toUpperCase() : "PENDING";
-        Page<LeaveRequest> page = leaveRequestRepository.findByStatusOrderByCreatedAtDesc(filterStatus, pageable);
+        String filterStatus = (status != null && !status.trim().isEmpty() && !"ALL".equalsIgnoreCase(status))
+                ? status.trim().toUpperCase() : null;
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        boolean isAll = "all".equalsIgnoreCase(activeTenant);
+
+        Page<LeaveRequest> page;
+        if (isAll) {
+            page = filterStatus != null
+                    ? leaveRequestRepository.findByStatusOrderByCreatedAtDesc(filterStatus, pageable)
+                    : leaveRequestRepository.findAllByOrderByCreatedAtDesc(pageable);
+        } else {
+            String tenant = activeTenant.trim().toLowerCase();
+            page = filterStatus != null
+                    ? leaveRequestRepository.findByEmployeeCompanyCodeAndStatusOrderByCreatedAtDesc(tenant, filterStatus, pageable)
+                    : leaveRequestRepository.findByEmployeeCompanyCodeOrderByCreatedAtDesc(tenant, pageable);
+        }
+
         List<LeaveRequestDto> dtos = page.getContent().stream().map(this::toDto).collect(Collectors.toList());
         return PageResponse.of(page, dtos);
     }
@@ -66,6 +81,10 @@ public class LeaveService {
     public LeaveRequestDto submitLeaveRequest(CreateLeaveRequest request) {
         Employee emp = employeeRepository.findById(request.getEmployeeId())
                 .orElseThrow(() -> new ResourceNotFoundException("Employee", "id", request.getEmployeeId()));
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if (!"all".equalsIgnoreCase(activeTenant) && !activeTenant.equalsIgnoreCase(emp.getCompanyCode())) {
+            throw new ResourceNotFoundException("Employee", "id", request.getEmployeeId());
+        }
 
         LeaveType lt = leaveTypeRepository.findById(request.getLeaveTypeId())
                 .orElseThrow(() -> new ResourceNotFoundException("LeaveType", "id", request.getLeaveTypeId()));
@@ -93,6 +112,10 @@ public class LeaveService {
     public LeaveRequestDto approveLeave(Long id, Long approverId, ApproveLeaveRequest request) {
         LeaveRequest lr = leaveRequestRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("LeaveRequest", "id", id));
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if (!"all".equalsIgnoreCase(activeTenant) && !activeTenant.equalsIgnoreCase(lr.getEmployee().getCompanyCode())) {
+            throw new ResourceNotFoundException("LeaveRequest", "id", id);
+        }
 
         if (!"PENDING".equalsIgnoreCase(lr.getStatus())) {
             throw new AppException(ErrorCode.BAD_REQUEST, "Leave request has already been processed");

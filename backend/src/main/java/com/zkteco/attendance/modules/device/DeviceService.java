@@ -26,6 +26,7 @@ import jakarta.persistence.criteria.Predicate;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
@@ -73,12 +74,26 @@ public class DeviceService {
     private final ZkDeviceMasterControlService masterControlService;
     private final com.zkteco.attendance.modules.system.TelegramNotificationService telegramService;
     private final org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
+    private final com.zkteco.attendance.modules.personnel.PersonnelCodeGeneratorService personnelCodeGeneratorService;
+    private final com.zkteco.attendance.modules.audit.AuditLogService auditLogService;
+    private final com.zkteco.attendance.modules.shift.EmployeeScheduleRepository scheduleRepository;
+
+    @Transactional(readOnly = true)
+    public String getNextDevicePin() {
+        return personnelCodeGeneratorService.generateNextUniqueCode();
+    }
 
     // Devices CRUD
     @Transactional(readOnly = true)
     public PageResponse<DeviceDto> getDevices(String search, String status, Pageable pageable) {
         Specification<AttendanceDevice> spec = (root, query, cb) -> {
             List<Predicate> predicates = new ArrayList<>();
+
+            String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+            if (activeTenant != null && !activeTenant.isBlank() && !"all".equalsIgnoreCase(activeTenant)) {
+                predicates.add(cb.equal(root.get("companyCode"), activeTenant.trim().toLowerCase()));
+            }
+
             if (search != null && !search.trim().isEmpty()) {
                 String pattern = "%" + search.trim().toLowerCase() + "%";
                 predicates.add(cb.or(
@@ -110,6 +125,9 @@ public class DeviceService {
             throw new AppException(ErrorCode.DUPLICATE_RESOURCE, "Serial number already registered: " + request.getSerialNumber());
         }
 
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if ("all".equalsIgnoreCase(activeTenant)) activeTenant = "default";
+
         AttendanceDevice device = AttendanceDevice.builder()
                 .name(request.getName().trim())
                 .serialNumber(request.getSerialNumber().trim().toUpperCase())
@@ -122,6 +140,7 @@ public class DeviceService {
                 .description(request.getDescription())
                 .active(request.getActive() != null ? request.getActive() : true)
                 .connectionStatus("OFFLINE")
+                .companyCode(activeTenant)
                 .build();
 
         if (request.getBranchId() != null) {
@@ -131,7 +150,10 @@ public class DeviceService {
             departmentRepository.findById(request.getDepartmentId()).ifPresent(device::setDepartment);
         }
 
-        return toDeviceDto(deviceRepository.save(device));
+        AttendanceDevice saved = deviceRepository.save(device);
+        auditLogService.record("CREATE_DEVICE", "DEVICE", String.valueOf(saved.getId()),
+                "Created device " + saved.getName() + " (" + saved.getIpAddress() + ":" + saved.getPort() + ", Company: " + saved.getCompanyCode() + ")");
+        return toDeviceDto(saved);
     }
 
     @Transactional
@@ -155,12 +177,20 @@ public class DeviceService {
             device.setDepartment(departmentRepository.findById(request.getDepartmentId()).orElse(null));
         }
 
-        return toDeviceDto(deviceRepository.save(device));
+        AttendanceDevice saved = deviceRepository.save(device);
+        auditLogService.record("UPDATE_DEVICE", "DEVICE", String.valueOf(saved.getId()),
+                "Updated device " + saved.getName() + " (" + saved.getIpAddress() + ":" + saved.getPort() + ")");
+        return toDeviceDto(saved);
     }
 
     @Transactional
     public void deleteDevice(Long id) {
+        AttendanceDevice device = deviceRepository.findById(id).orElse(null);
+        String name = device != null ? device.getName() : "Device #" + id;
+        String ip = device != null ? device.getIpAddress() : "";
         deviceRepository.deleteById(id);
+        auditLogService.record("DELETE_DEVICE", "DEVICE", String.valueOf(id),
+                "Deleted device " + name + " (" + ip + ")");
     }
 
     // Hardware Operations
@@ -470,6 +500,8 @@ public class DeviceService {
         }
 
         recordOperation(device, action, "Params: voiceIndex=" + request.getVoiceIndex(), success ? "SUCCESS" : "FAILED", success ? null : message);
+        auditLogService.record("DEVICE_CONTROL_" + action, "DEVICE", String.valueOf(device.getId()),
+                "Device: " + device.getName() + " (" + device.getIpAddress() + ") - Action: " + action + " - Result: " + (success ? "SUCCESS" : "FAILED") + " - " + message);
 
         return DeviceControlResponseDto.builder()
                 .deviceId(device.getId())
@@ -508,6 +540,7 @@ public class DeviceService {
                             .verifyType(r.getVerifyType() != null ? r.getVerifyType() : "OTHER")
                             .workCode(r.getWorkCode())
                             .idempotencyKey(idempotencyKey)
+                            .companyCode(device.getCompanyCode() != null ? device.getCompanyCode() : "default")
                             .processed(false)
                             .build();
                     rawLogRepository.save(logEntry);
@@ -724,22 +757,56 @@ public class DeviceService {
         return result;
     }
 
+    @Transactional
+    public Map<String, Object> wipeDeviceData(Long id) {
+        AttendanceDevice device = findDevice(id);
+        String ip = device.getIpAddress();
+        int port = device.getPort() > 0 ? device.getPort() : 4370;
+
+        JsonNode res = masterControlService.execute(ip, port, "clear-all-data", null);
+        boolean success = res.has("success") && res.get("success").asBoolean();
+
+        recordOperation(device, "WIPE_TERMINAL_DATA", "Wiped hardware memory to empty",
+                success ? "SUCCESS" : "FAILED", success ? null : res.path("message").asText());
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("deviceId", device.getId());
+        result.put("deviceName", device.getName());
+        result.put("ipAddress", ip);
+        result.put("success", success);
+        result.put("details", res);
+        result.put("message", res.path("message").asText("Machine wiped to empty"));
+        return result;
+    }
+
     // Device Users
     @Transactional(readOnly = true)
     public PageResponse<DeviceUserDto> getDeviceUsers(Long deviceId, String search, Pageable pageable) {
-        return getDeviceUsers(deviceId, search, null, null, null, null, pageable);
+        return getDeviceUsers(deviceId, search, null, null, null, null, true, pageable);
     }
 
     @Transactional(readOnly = true)
     public PageResponse<DeviceUserDto> getDeviceUsers(Long deviceId, String search, String status, Pageable pageable) {
-        return getDeviceUsers(deviceId, search, status, null, null, null, pageable);
+        return getDeviceUsers(deviceId, search, status, null, null, null, true, pageable);
     }
 
     @Transactional(readOnly = true)
     public PageResponse<DeviceUserDto> getDeviceUsers(
             Long deviceId, String search, String status, String biometricFilter, String personnelType, String sortBy, Pageable pageable) {
+        return getDeviceUsers(deviceId, search, status, biometricFilter, personnelType, sortBy, true, pageable);
+    }
+
+    @Transactional(readOnly = true)
+    public PageResponse<DeviceUserDto> getDeviceUsers(
+            Long deviceId, String search, String status, String biometricFilter, String personnelType, String sortBy, Boolean groupByPin, Pageable pageable) {
         Specification<AttendanceDeviceUser> spec = (root, query, cb) -> {
             List<Predicate> predicates = new ArrayList<>();
+
+            String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+            if (activeTenant != null && !activeTenant.isBlank() && !"all".equalsIgnoreCase(activeTenant)) {
+                predicates.add(cb.equal(root.get("companyCode"), activeTenant.trim().toLowerCase()));
+            }
+
             if (deviceId != null) {
                 predicates.add(cb.equal(root.get("device").get("id"), deviceId));
             }
@@ -819,7 +886,6 @@ public class DeviceService {
             return cb.and(predicates.toArray(new Predicate[0]));
         };
 
-        Page<AttendanceDeviceUser> page = deviceUserRepository.findAll(spec, pageable);
         Map<String, Integer> countMap = new HashMap<>();
         try {
             List<Object[]> counts = cardHistoryRepository.countGroupedByDevicePin();
@@ -830,6 +896,105 @@ public class DeviceService {
             }
         } catch (Exception ignored) {}
 
+        boolean shouldGroup = deviceId == null && (groupByPin == null || Boolean.TRUE.equals(groupByPin));
+        if (shouldGroup) {
+            List<AttendanceDeviceUser> allMatching = deviceUserRepository.findAll(spec);
+            Map<String, List<AttendanceDeviceUser>> pinGroups = new LinkedHashMap<>();
+            for (AttendanceDeviceUser u : allMatching) {
+                String key = (u.getDevicePin() != null && !u.getDevicePin().isBlank())
+                        ? u.getDevicePin().trim() : ("ID_" + u.getId());
+                pinGroups.computeIfAbsent(key, k -> new ArrayList<>()).add(u);
+            }
+
+            List<DeviceUserDto> groupedDtos = new ArrayList<>();
+            for (Map.Entry<String, List<AttendanceDeviceUser>> entry : pinGroups.entrySet()) {
+                List<AttendanceDeviceUser> group = entry.getValue();
+                AttendanceDeviceUser primary = group.get(0);
+
+                List<Long> devIds = new ArrayList<>();
+                List<String> devNames = new ArrayList<>();
+                List<String> devSns = new ArrayList<>();
+                List<Long> allUserIds = new ArrayList<>();
+                List<DeviceUserDto.DeviceInfo> syncedDevs = new ArrayList<>();
+                int maxFp = 0;
+                boolean anyFace = false;
+                String effectiveCard = null;
+
+                for (AttendanceDeviceUser item : group) {
+                    allUserIds.add(item.getId());
+                    if (item.getDevice() != null) {
+                        if (!devIds.contains(item.getDevice().getId())) {
+                            devIds.add(item.getDevice().getId());
+                            devNames.add(item.getDevice().getName());
+                            devSns.add(item.getDevice().getSerialNumber());
+                            syncedDevs.add(DeviceUserDto.DeviceInfo.builder()
+                                    .deviceId(item.getDevice().getId())
+                                    .deviceName(item.getDevice().getName())
+                                    .deviceSerialNumber(item.getDevice().getSerialNumber())
+                                    .ipAddress(item.getDevice().getIpAddress())
+                                    .port(item.getDevice().getPort())
+                                    .integrationType(item.getDevice().getIntegrationType())
+                                    .deviceUserId(item.getId())
+                                    .syncStatus(item.getSyncStatus())
+                                    .build());
+                        }
+                    }
+                    if (item.getFingerprintCount() > maxFp) maxFp = item.getFingerprintCount();
+                    if (item.isFaceEnrolled()) anyFace = true;
+                    if (effectiveCard == null && item.getCardNumber() != null && !item.getCardNumber().isBlank()) {
+                        effectiveCard = item.getCardNumber();
+                    }
+                }
+
+                DeviceUserDto dto = toDeviceUserDto(primary, countMap.getOrDefault(entry.getKey(), 0));
+                dto.setDeviceIds(devIds);
+                dto.setDeviceNames(devNames);
+                dto.setDeviceSerialNumbers(devSns);
+                dto.setAllDeviceUserIds(allUserIds);
+                dto.setDeviceCount(devIds.size());
+                dto.setSyncedDevices(syncedDevs);
+                dto.setFingerprintCount(maxFp);
+                dto.setFaceEnrolled(anyFace);
+                if (effectiveCard != null) dto.setCardNumber(effectiveCard);
+
+                groupedDtos.add(dto);
+            }
+
+            Comparator<DeviceUserDto> comp;
+            if ("PIN_DESC".equalsIgnoreCase(sortBy)) {
+                comp = (a, b) -> {
+                    try { return Long.compare(Long.parseLong(b.getDevicePin()), Long.parseLong(a.getDevicePin())); }
+                    catch (Exception e) { return (b.getDevicePin() != null ? b.getDevicePin() : "").compareTo(a.getDevicePin() != null ? a.getDevicePin() : ""); }
+                };
+            } else if ("NAME_ASC".equalsIgnoreCase(sortBy)) {
+                comp = Comparator.comparing(d -> (d.getNameOnDevice() != null ? d.getNameOnDevice() : "").toLowerCase());
+            } else if ("NAME_DESC".equalsIgnoreCase(sortBy)) {
+                comp = Comparator.comparing((DeviceUserDto d) -> (d.getNameOnDevice() != null ? d.getNameOnDevice() : "").toLowerCase()).reversed();
+            } else if ("FP_FIRST".equalsIgnoreCase(sortBy)) {
+                comp = Comparator.comparingInt(DeviceUserDto::getFingerprintCount).reversed();
+            } else if ("NO_FP_FIRST".equalsIgnoreCase(sortBy)) {
+                comp = Comparator.comparingInt(DeviceUserDto::getFingerprintCount);
+            } else if ("CARD_FIRST".equalsIgnoreCase(sortBy)) {
+                comp = Comparator.comparing((DeviceUserDto d) -> d.getCardNumber() != null && !d.getCardNumber().isBlank()).reversed();
+            } else if ("RECENT".equalsIgnoreCase(sortBy)) {
+                comp = Comparator.comparing((DeviceUserDto d) -> d.getLastSyncedAt() != null ? d.getLastSyncedAt() : Instant.EPOCH).reversed();
+            } else {
+                comp = (a, b) -> {
+                    try { return Long.compare(Long.parseLong(a.getDevicePin()), Long.parseLong(b.getDevicePin())); }
+                    catch (Exception e) { return (a.getDevicePin() != null ? a.getDevicePin() : "").compareTo(b.getDevicePin() != null ? b.getDevicePin() : ""); }
+                };
+            }
+            groupedDtos.sort(comp);
+
+            int total = groupedDtos.size();
+            int start = (int) pageable.getOffset();
+            int end = Math.min((start + pageable.getPageSize()), total);
+            List<DeviceUserDto> pageContent = (start <= total) ? groupedDtos.subList(start, end) : Collections.emptyList();
+            Page<DeviceUserDto> pageResult = new PageImpl<>(pageContent, pageable, total);
+            return PageResponse.of(pageResult, pageContent);
+        }
+
+        Page<AttendanceDeviceUser> page = deviceUserRepository.findAll(spec, pageable);
         List<DeviceUserDto> dtos = page.getContent().stream()
                 .map(u -> toDeviceUserDto(u, countMap.getOrDefault(u.getDevicePin(), 0)))
                 .collect(Collectors.toList());
@@ -840,6 +1005,10 @@ public class DeviceService {
     public DeviceUserDto updateDeviceUserStatus(Long id, String status) {
         AttendanceDeviceUser devUser = deviceUserRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("DeviceUser", "id", id));
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if (!"all".equalsIgnoreCase(activeTenant) && !activeTenant.equalsIgnoreCase(devUser.getCompanyCode())) {
+            throw new ResourceNotFoundException("DeviceUser", "id", id);
+        }
         String newStatus = "INACTIVE".equalsIgnoreCase(status) ? "INACTIVE" : "ACTIVE";
         devUser.setStatus(newStatus);
         devUser.setSyncStatus("SYNCED");
@@ -851,13 +1020,70 @@ public class DeviceService {
     @Transactional
     public DeviceUserDto createDeviceUser(CreateDeviceUserRequest request) {
         AttendanceDevice device = findDevice(request.getDeviceId());
-        if (deviceUserRepository.existsByDeviceIdAndDevicePin(device.getId(), request.getDevicePin())) {
-            throw new AppException(ErrorCode.DUPLICATE_RESOURCE, "PIN " + request.getDevicePin() + " already exists on device " + device.getName());
+
+        String pin = request.getDevicePin();
+        if (pin == null || pin.trim().isEmpty()) {
+            if (request.getEmployeeId() != null) {
+                var emp = employeeRepository.findById(request.getEmployeeId()).orElse(null);
+                if (emp != null && emp.getEmployeeCode() != null && !emp.getEmployeeCode().isBlank()) {
+                    pin = emp.getEmployeeCode().trim();
+                }
+            } else if (request.getStudentId() != null) {
+                var stu = studentRepository.findById(request.getStudentId()).orElse(null);
+                if (stu != null && stu.getStudentCode() != null && !stu.getStudentCode().isBlank()) {
+                    pin = stu.getStudentCode().trim();
+                }
+            }
+            if (pin == null || pin.trim().isEmpty()) {
+                pin = personnelCodeGeneratorService.generateNextUniqueCode();
+            }
+        } else {
+            pin = pin.trim().replaceAll("[^0-9]", "");
+            if (pin.isEmpty()) {
+                pin = personnelCodeGeneratorService.generateNextUniqueCode();
+            }
         }
+
+        java.util.Optional<AttendanceDeviceUser> existingOpt = deviceUserRepository.findByDeviceIdAndDevicePin(device.getId(), pin);
+        if (existingOpt.isPresent()) {
+            AttendanceDeviceUser existing = existingOpt.get();
+            boolean sameEmployee = request.getEmployeeId() != null && existing.getEmployee() != null 
+                    && existing.getEmployee().getId().equals(request.getEmployeeId());
+            boolean sameStudent = request.getStudentId() != null && existing.getStudent() != null 
+                    && existing.getStudent().getId().equals(request.getStudentId());
+
+            if (sameEmployee || sameStudent || (existing.getEmployee() == null && existing.getStudent() == null)) {
+                // Upsert: update existing mapping instead of conflicting
+                if (request.getNameOnDevice() != null && !request.getNameOnDevice().isBlank()) {
+                    existing.setNameOnDevice(request.getNameOnDevice());
+                }
+                if (request.getPrivilege() != null) existing.setPrivilege(request.getPrivilege());
+                if (request.getCardNumber() != null) existing.setCardNumber(request.getCardNumber());
+                if (request.getPassword() != null) existing.setPassword(request.getPassword());
+                if (request.getEmployeeId() != null) {
+                    employeeRepository.findById(request.getEmployeeId()).ifPresent(existing::setEmployee);
+                }
+                if (request.getStudentId() != null) {
+                    studentRepository.findById(request.getStudentId()).ifPresent(existing::setStudent);
+                }
+                existing.setStatus("ACTIVE");
+                existing.setSyncStatus("SYNCED");
+                existing.setLastSyncedAt(Instant.now());
+                AttendanceDeviceUser saved = deviceUserRepository.save(existing);
+                queueUserToDevice(device, saved);
+                return toDeviceUserDto(saved);
+            }
+
+            String existingOwner = existing.getNameOnDevice() != null ? existing.getNameOnDevice() : "another user";
+            throw new AppException(ErrorCode.DUPLICATE_RESOURCE, "PIN " + pin + " already exists on device " + device.getName() + " (assigned to " + existingOwner + ")");
+        }
+
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if ("all".equalsIgnoreCase(activeTenant)) activeTenant = "default";
 
         AttendanceDeviceUser devUser = AttendanceDeviceUser.builder()
                 .device(device)
-                .devicePin(request.getDevicePin().trim())
+                .devicePin(pin)
                 .nameOnDevice(request.getNameOnDevice())
                 .privilege(request.getPrivilege() != null ? request.getPrivilege() : "NORMAL_USER")
                 .cardNumber(request.getCardNumber())
@@ -866,6 +1092,7 @@ public class DeviceService {
                 .fingerprintCount(request.getFingerprintCount() != null ? request.getFingerprintCount() : 0)
                 .syncStatus("SYNCED")
                 .lastSyncedAt(Instant.now())
+                .companyCode(activeTenant)
                 .build();
 
         if (request.getEmployeeId() != null) {
@@ -884,6 +1111,10 @@ public class DeviceService {
     public DeviceUserDto updateDeviceUser(Long id, CreateDeviceUserRequest request) {
         AttendanceDeviceUser devUser = deviceUserRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("DeviceUser", "id", id));
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if (!"all".equalsIgnoreCase(activeTenant) && !activeTenant.equalsIgnoreCase(devUser.getCompanyCode())) {
+            throw new ResourceNotFoundException("DeviceUser", "id", id);
+        }
 
         if (request.getDevicePin() != null && !request.getDevicePin().trim().isEmpty()) {
             String newPin = request.getDevicePin().trim();
@@ -956,6 +1187,10 @@ public class DeviceService {
     public DeviceUserDto enrollBiometrics(Long deviceUserId, Boolean faceEnrolled, Integer fingerprintCount, String cardNumber) {
         AttendanceDeviceUser devUser = deviceUserRepository.findById(deviceUserId)
                 .orElseThrow(() -> new ResourceNotFoundException("DeviceUser", "id", deviceUserId));
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if (!"all".equalsIgnoreCase(activeTenant) && !activeTenant.equalsIgnoreCase(devUser.getCompanyCode())) {
+            throw new ResourceNotFoundException("DeviceUser", "id", deviceUserId);
+        }
 
         if (faceEnrolled != null) devUser.setFaceEnrolled(faceEnrolled);
         if (fingerprintCount != null) devUser.setFingerprintCount(fingerprintCount);
@@ -1000,6 +1235,8 @@ public class DeviceService {
         recordOperation(saved.getDevice(), "ENROLL_BIOMETRICS",
                 "PIN=" + saved.getDevicePin() + " Face=" + saved.isFaceEnrolled() + " FP=" + saved.getFingerprintCount(),
                 "SUCCESS", null);
+        auditLogService.record("ENROLL_BIOMETRICS", "BIOMETRIC", String.valueOf(saved.getId()),
+                "Enrolled biometrics for PIN " + saved.getDevicePin() + " (" + saved.getNameOnDevice() + ") - Card: " + saved.getCardNumber() + ", Face: " + saved.isFaceEnrolled() + ", FP: " + saved.getFingerprintCount());
 
         return toDeviceUserDto(saved);
     }
@@ -1053,6 +1290,8 @@ public class DeviceService {
         recordOperation(saved.getDevice(), "CHANGE_CARD_NUMBER",
                 "PIN=" + saved.getDevicePin() + " OldCard=" + oldCard + " NewCard=" + newCard + " Year=" + academicYear,
                 "SUCCESS", null);
+        auditLogService.record("CHANGE_CARD_NUMBER", "CARD", String.valueOf(saved.getId()),
+                "Old: " + oldCard, "New: " + newCard + " (PIN: " + saved.getDevicePin() + ", " + saved.getNameOnDevice() + ")");
 
         return toDeviceUserDto(saved);
     }
@@ -1143,12 +1382,171 @@ public class DeviceService {
 
     @Transactional
     public void deleteDeviceUser(Long id) {
-        deviceUserRepository.findById(id).ifPresent(u -> {
+        AttendanceDeviceUser u = deviceUserRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("DeviceUser", "id", id));
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if (!"all".equalsIgnoreCase(activeTenant) && !activeTenant.equalsIgnoreCase(u.getCompanyCode())) {
+            throw new ResourceNotFoundException("DeviceUser", "id", id);
+        }
+        String pin = u.getDevicePin();
+        String companyCode = u.getCompanyCode();
+        String ip = u.getDevice() != null ? u.getDevice().getIpAddress() : null;
+        Integer port = u.getDevice() != null ? u.getDevice().getPort() : null;
+
+        deviceUserRepository.delete(u);
+
+        try {
+            if (u.getEmployee() != null) {
+                scheduleRepository.deleteByEmployeeId(u.getEmployee().getId());
+            }
+            if (u.getStudent() != null) {
+                scheduleRepository.deleteByStudentId(u.getStudent().getId());
+            }
+        } catch (Exception ex) {
+            log.warn("Schedule cleanup during device user delete failed: {}", ex.getMessage());
+        }
+
+        if (pin != null && !pin.isBlank()) {
             try {
-                terminalSyncService.deleteUserFromPhysicalMachinesAsync(u.getDevicePin());
-            } catch (Exception ignored) {}
-            deviceUserRepository.delete(u);
-        });
+                // Clean user from specific physical terminal
+                terminalSyncService.deleteUserFromPhysicalMachinesAsync(pin, companyCode, ip, port);
+            } catch (Exception ex) {
+                log.warn("Terminal sync hook failed during delete for PIN {}: {}", pin, ex.getMessage());
+            }
+        }
+        auditLogService.record("DELETE_DEVICE_USER", "DEVICE_USER", String.valueOf(id),
+                "Deleted device user mapping PIN: " + pin + " from device " + (ip != null ? ip : "terminal") + " (Company: " + companyCode + ")");
+    }
+
+    @Transactional
+    public void removeUserFromDevice(Long deviceId, String pin) {
+        if (pin == null || pin.isBlank() || deviceId == null) return;
+        AttendanceDevice device = findDevice(deviceId);
+        String cleanPin = pin.trim();
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        boolean isAll = "all".equalsIgnoreCase(activeTenant);
+
+        Optional<AttendanceDeviceUser> devUserOpt = deviceUserRepository.findByDeviceIdAndDevicePin(deviceId, cleanPin);
+        if (devUserOpt.isEmpty()) {
+            throw new ResourceNotFoundException("DeviceUser", "pin", cleanPin);
+        }
+
+        AttendanceDeviceUser u = devUserOpt.get();
+        if (!isAll && !activeTenant.equalsIgnoreCase(u.getCompanyCode())) {
+            throw new ResourceNotFoundException("DeviceUser", "pin", cleanPin);
+        }
+
+        deviceUserRepository.delete(u);
+
+        try {
+            if (u.getEmployee() != null) {
+                scheduleRepository.deleteByEmployeeId(u.getEmployee().getId());
+            }
+            if (u.getStudent() != null) {
+                scheduleRepository.deleteByStudentId(u.getStudent().getId());
+            }
+        } catch (Exception ex) {
+            log.warn("Schedule cleanup during device user delete failed: {}", ex.getMessage());
+        }
+
+        try {
+            terminalSyncService.deleteUserFromPhysicalMachinesAsync(
+                    cleanPin, u.getCompanyCode(), device.getIpAddress(), device.getPort());
+        } catch (Exception ex) {
+            log.warn("Failed to clean user {} from terminal {}: {}", cleanPin, device.getName(), ex.getMessage());
+        }
+
+        auditLogService.record("REMOVE_USER_FROM_DEVICE", "DEVICE_USER", String.valueOf(u.getId()),
+                "Removed user PIN: " + cleanPin + " from terminal " + device.getName() + " (" + device.getIpAddress() + ")");
+    }
+
+    @Transactional
+    public DeviceUserDto addUserToDevice(Long deviceId, String pin) {
+        AttendanceDevice device = findDevice(deviceId);
+        String cleanPin = pin.trim();
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        boolean isAll = "all".equalsIgnoreCase(activeTenant);
+
+        Optional<AttendanceDeviceUser> existingInDevice = deviceUserRepository.findByDeviceIdAndDevicePin(deviceId, cleanPin);
+        if (existingInDevice.isPresent()) {
+            return toDeviceUserDto(existingInDevice.get());
+        }
+
+        List<AttendanceDeviceUser> anyDeviceUser = deviceUserRepository.findByDevicePin(cleanPin);
+        if (anyDeviceUser.isEmpty()) {
+            throw new ResourceNotFoundException("DeviceUser", "pin", cleanPin);
+        }
+        AttendanceDeviceUser template = anyDeviceUser.get(0);
+        if (!isAll && !activeTenant.equalsIgnoreCase(template.getCompanyCode())) {
+            throw new ResourceNotFoundException("DeviceUser", "pin", cleanPin);
+        }
+
+        AttendanceDeviceUser newUser = AttendanceDeviceUser.builder()
+                .device(device)
+                .devicePin(cleanPin)
+                .employee(template.getEmployee())
+                .student(template.getStudent())
+                .nameOnDevice(template.getNameOnDevice())
+                .privilege(template.getPrivilege())
+                .cardNumber(template.getCardNumber())
+                .password(template.getPassword())
+                .faceEnrolled(template.isFaceEnrolled())
+                .fingerprintCount(template.getFingerprintCount())
+                .syncStatus("SYNCED")
+                .status(template.getStatus())
+                .companyCode(template.getCompanyCode())
+                .lastSyncedAt(Instant.now())
+                .build();
+
+        AttendanceDeviceUser saved = deviceUserRepository.save(newUser);
+        try {
+            terminalSyncService.syncDeviceUser(saved);
+        } catch (Exception ex) {
+            log.warn("Failed to sync new device user to hardware terminal {}: {}", device.getName(), ex.getMessage());
+        }
+
+        auditLogService.record("ADD_USER_TO_DEVICE", "DEVICE_USER", String.valueOf(saved.getId()),
+                "Assigned user PIN: " + cleanPin + " to terminal " + device.getName() + " (" + device.getIpAddress() + ")");
+
+        return toDeviceUserDto(saved);
+    }
+
+    @Transactional
+    public void deleteDeviceUserByPin(String pin) {
+        if (pin == null || pin.isBlank()) return;
+        String cleanPin = pin.trim();
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        boolean isAll = "all".equalsIgnoreCase(activeTenant);
+
+        List<AttendanceDeviceUser> toDelete = isAll
+                ? deviceUserRepository.findByDevicePin(cleanPin)
+                : deviceUserRepository.findByDevicePin(cleanPin).stream()
+                        .filter(u -> activeTenant.equalsIgnoreCase(u.getCompanyCode()))
+                        .toList();
+
+        if (!toDelete.isEmpty()) {
+            deviceUserRepository.deleteAll(toDelete);
+            try {
+                for (AttendanceDeviceUser item : toDelete) {
+                    if (item.getEmployee() != null) {
+                        scheduleRepository.deleteByEmployeeId(item.getEmployee().getId());
+                    }
+                    if (item.getStudent() != null) {
+                        scheduleRepository.deleteByStudentId(item.getStudent().getId());
+                    }
+                }
+            } catch (Exception ex) {
+                log.warn("Schedule cleanup during delete by PIN failed: {}", ex.getMessage());
+            }
+        }
+
+        try {
+            terminalSyncService.deleteUserFromPhysicalMachinesAsync(cleanPin, isAll ? null : activeTenant);
+        } catch (Exception ex) {
+            log.warn("Terminal sync hook failed during delete by PIN {}: {}", cleanPin, ex.getMessage());
+        }
+        auditLogService.record("DELETE_DEVICE_USER_BY_PIN", "DEVICE_USER", cleanPin,
+                "Cleaned device user by PIN: " + cleanPin + " (Company: " + activeTenant + ")");
     }
 
     @Transactional
@@ -1307,8 +1705,13 @@ public class DeviceService {
 
     // Helper Methods
     private AttendanceDevice findDevice(Long id) {
-        return deviceRepository.findById(id)
+        AttendanceDevice dev = deviceRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Device", "id", id));
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        if (!"all".equalsIgnoreCase(activeTenant) && !activeTenant.equalsIgnoreCase(dev.getCompanyCode())) {
+            throw new ResourceNotFoundException("Device", "id", id);
+        }
+        return dev;
     }
 
     private void recordOperation(AttendanceDevice device, String op, String params, String result, String error) {
@@ -1367,6 +1770,7 @@ public class DeviceService {
                 .lastSync(d.getLastSync())
                 .firmwareVersion(d.getFirmwareVersion())
                 .active(d.isActive())
+                .companyCode(d.getCompanyCode())
                 .build();
     }
 
@@ -1408,6 +1812,24 @@ public class DeviceService {
         String khmerName = u.getEmployee() != null ? u.getEmployee().getKhmerName()
                 : (u.getStudent() != null ? u.getStudent().getKhmerName() : null);
 
+        List<Long> devIds = u.getDevice() != null ? List.of(u.getDevice().getId()) : Collections.emptyList();
+        List<String> devNames = u.getDevice() != null ? List.of(u.getDevice().getName()) : Collections.emptyList();
+        List<String> devSns = u.getDevice() != null ? List.of(u.getDevice().getSerialNumber()) : Collections.emptyList();
+        List<Long> allIds = List.of(u.getId());
+        List<DeviceUserDto.DeviceInfo> syncedDevs = new ArrayList<>();
+        if (u.getDevice() != null) {
+            syncedDevs.add(DeviceUserDto.DeviceInfo.builder()
+                    .deviceId(u.getDevice().getId())
+                    .deviceName(u.getDevice().getName())
+                    .deviceSerialNumber(u.getDevice().getSerialNumber())
+                    .ipAddress(u.getDevice().getIpAddress())
+                    .port(u.getDevice().getPort())
+                    .integrationType(u.getDevice().getIntegrationType())
+                    .deviceUserId(u.getId())
+                    .syncStatus(u.getSyncStatus())
+                    .build());
+        }
+
         return DeviceUserDto.builder()
                 .id(u.getId())
                 .deviceId(u.getDevice().getId())
@@ -1435,7 +1857,14 @@ public class DeviceService {
                 .status(status)
                 .profileImageUrl(photoUrl)
                 .personnelKhmerName(khmerName)
+                .companyCode(u.getCompanyCode())
                 .lastSyncedAt(u.getLastSyncedAt())
+                .deviceIds(devIds)
+                .deviceNames(devNames)
+                .deviceSerialNumbers(devSns)
+                .allDeviceUserIds(allIds)
+                .deviceCount(devIds.size())
+                .syncedDevices(syncedDevs)
                 .build();
     }
 
@@ -1473,7 +1902,7 @@ public class DeviceService {
                 String deptName = emp.getDepartment() != null ? emp.getDepartment().getName() : "";
                 String combined = (posTitle + " " + deptName).toLowerCase();
 
-                if (combined.contains("teacher") || combined.contains("teach") ||
+                if (emp.isTeacherPerson() || combined.contains("teacher") || combined.contains("teach") ||
                     combined.contains("lecturer") || combined.contains("professor") ||
                     combined.contains("instructor") || combined.contains("academic") ||
                     combined.contains("acad") || combined.contains("គ្រូ") || combined.contains("បង្រៀន")) {
@@ -1499,7 +1928,7 @@ public class DeviceService {
                     String deptName = emp.getDepartment() != null ? emp.getDepartment().getName() : "";
                     String combined = (posTitle + " " + deptName).toLowerCase();
 
-                    if (combined.contains("teacher") || combined.contains("teach") ||
+                    if (emp.isTeacherPerson() || combined.contains("teacher") || combined.contains("teach") ||
                         combined.contains("lecturer") || combined.contains("professor") ||
                         combined.contains("instructor") || combined.contains("academic") ||
                         combined.contains("acad") || combined.contains("គ្រូ") || combined.contains("បង្រៀន")) {
@@ -1527,13 +1956,15 @@ public class DeviceService {
      */
     @Transactional
     public Map<String, Object> autoMapAllPersonnel(Long targetDeviceId, String personnelType) {
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        boolean isAll = "all".equalsIgnoreCase(activeTenant);
         List<AttendanceDevice> targets;
         if (targetDeviceId != null) {
             targets = List.of(findDevice(targetDeviceId));
         } else {
-            targets = deviceRepository.findAllByActiveTrue();
+            targets = isAll ? deviceRepository.findAllByActiveTrue() : deviceRepository.findByCompanyCodeAndActiveTrue(activeTenant);
             if (targets.isEmpty()) {
-                targets = deviceRepository.findAll();
+                targets = isAll ? deviceRepository.findAll() : deviceRepository.findByCompanyCode(activeTenant);
             }
         }
 
@@ -1544,7 +1975,8 @@ public class DeviceService {
         String scope = (personnelType != null && !personnelType.isBlank()) ? personnelType.trim().toUpperCase() : "ALL";
 
         // Pre-load existing keys: deviceId_devicePin
-        Set<String> existingKeys = deviceUserRepository.findAll().stream()
+        List<AttendanceDeviceUser> existingList = isAll ? deviceUserRepository.findAll() : deviceUserRepository.findByCompanyCode(activeTenant);
+        Set<String> existingKeys = existingList.stream()
                 .map(u -> u.getDevice().getId() + "_" + u.getDevicePin())
                 .collect(Collectors.toSet());
 
@@ -1597,7 +2029,9 @@ public class DeviceService {
 
         // 1. Employees
         if ("ALL".equals(scope) || "EMPLOYEE".equals(scope)) {
-            List<Employee> employees = employeeRepository.findByDeletedAtIsNull();
+            List<Employee> employees = isAll
+                    ? employeeRepository.findByDeletedAtIsNull()
+                    : employeeRepository.findByCompanyCodeAndDeletedAtIsNull(activeTenant);
             for (Employee emp : employees) {
                 String pin = emp.getEmployeeCode();
                 if (pin == null || pin.isBlank()) continue;
@@ -1630,6 +2064,7 @@ public class DeviceService {
                             .syncStatus("SYNCED")
                             .lastSyncedAt(Instant.now())
                             .status("ACTIVE")
+                            .companyCode(emp.getCompanyCode() != null ? emp.getCompanyCode().trim().toLowerCase() : activeTenant)
                             .build();
 
                     toSave.add(devUser);
@@ -1641,9 +2076,9 @@ public class DeviceService {
 
         // 2. Students
         if ("ALL".equals(scope) || "STUDENT".equals(scope)) {
-            List<Student> students = studentRepository.findAll().stream()
-                    .filter(s -> s.getDeletedAt() == null)
-                    .toList();
+            List<Student> students = isAll
+                    ? studentRepository.findAll().stream().filter(s -> s.getDeletedAt() == null).toList()
+                    : studentRepository.findByCompanyCodeAndDeletedAtIsNull(activeTenant);
             for (Student st : students) {
                 String pin = st.getStudentCode();
                 if (pin == null || pin.isBlank()) continue;
@@ -1676,6 +2111,7 @@ public class DeviceService {
                             .syncStatus("SYNCED")
                             .lastSyncedAt(Instant.now())
                             .status("ACTIVE")
+                            .companyCode(st.getCompanyCode() != null ? st.getCompanyCode().trim().toLowerCase() : activeTenant)
                             .build();
 
                     toSave.add(devUser);
@@ -1700,18 +2136,28 @@ public class DeviceService {
                 "Successfully mapped %d personnel (%d employees, %d students) across %d terminals! %d existing mappings were preserved.",
                 toSave.size(), mappedEmployees, mappedStudents, targets.size(), skippedCount
         ));
+        auditLogService.record("AUTO_MAP_PERSONNEL", "DEVICE_USER", null,
+                "Auto-mapped " + toSave.size() + " personnel (" + mappedEmployees + " emp, " + mappedStudents + " stu) across " + targets.size() + " terminals");
         return result;
     }
 
     @Transactional
     public Map<String, Object> clearAllMappedUsers(Long targetDeviceId) {
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        boolean isAll = "all".equalsIgnoreCase(activeTenant);
         int deletedCount;
         if (targetDeviceId != null) {
-            deletedCount = jdbcTemplate.update("DELETE FROM attendance_device_users WHERE device_id = ?", targetDeviceId);
-        } else {
+            AttendanceDevice dev = findDevice(targetDeviceId);
+            deletedCount = jdbcTemplate.update("DELETE FROM attendance_device_users WHERE device_id = ?", dev.getId());
+        } else if (isAll) {
             deletedCount = jdbcTemplate.update("DELETE FROM attendance_device_users");
+        } else {
+            deletedCount = jdbcTemplate.update("DELETE FROM attendance_device_users WHERE company_code = ?", activeTenant.toLowerCase());
         }
-        log.info("Cleared {} device user mappings (targetDeviceId={})", deletedCount, targetDeviceId);
+        log.info("Cleared {} device user mappings (targetDeviceId={}, tenant={})", deletedCount, targetDeviceId, activeTenant);
+        auditLogService.record("CLEAR_ALL_MAPPINGS", "DEVICE_USER", null,
+                "Cleared " + deletedCount + " device user mappings (Tenant: " + activeTenant + (targetDeviceId != null ? ", Device #" + targetDeviceId : "") + ")");
+
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("success", true);
         result.put("deletedCount", deletedCount);

@@ -69,6 +69,10 @@ public class Shift extends BaseEntity {
     private boolean active = true;
 
     @Builder.Default
+    @Column(name = "company_code", nullable = false, length = 50)
+    private String companyCode = "default";
+
+    @Builder.Default
     @OneToMany(mappedBy = "shift", cascade = CascadeType.ALL, orphanRemoval = true)
     private List<ShiftBreak> breaks = new ArrayList<>();
 }

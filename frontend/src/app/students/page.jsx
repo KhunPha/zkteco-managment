@@ -22,11 +22,17 @@ import {
   CheckSquare,
   Square,
   Camera,
+  Activity,
+  GitFork,
+  Clock,
+  AlertTriangle,
 } from "lucide-react";
+import Link from "next/link";
 import api from "@/lib/api";
 import ImageUploadDropzone from "@/components/common/ImageUploadDropzone";
 import Portal from "@/components/common/Portal";
 import WebcamFaceEnrollModal from "@/components/biometrics/WebcamFaceEnrollModal";
+import KhmerPhoneInput from "@/components/common/KhmerPhoneInput";
 
 const ALL_GRADES = [
   "Kindergarten",
@@ -77,6 +83,7 @@ export default function StudentsPage() {
   const [search, setSearch] = useState("");
   const [className, setClassName] = useState("");
   const [gradeFilter, setGradeFilter] = useState("");
+  const [branchFilter, setBranchFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("ALL");
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(25);
@@ -101,9 +108,11 @@ export default function StudentsPage() {
 
   const [formData, setFormData] = useState({
     studentCode: "",
+    idNumber: "",
     englishName: "",
     khmerName: "",
     gender: "MALE",
+    branchId: "",   // will be set dynamically after branches load
     className: "Class 10A",
     grade: "Grade 10",
     academicYear: "2026-2027",
@@ -111,9 +120,79 @@ export default function StudentsPage() {
     status: "ACTIVE",
     cardNumber: "",
     profileImageUrl: "",
+    shiftId: "",
   });
 
+  const { data: shifts = [] } = useQuery({
+    queryKey: ["all-shifts"],
+    queryFn: async () => {
+      const res = await api.get("/api/v1/shifts");
+      return res.data?.data || [];
+    },
+  });
+
+  const { data: unassignedSummary } = useQuery({
+    queryKey: ["unassigned-summary"],
+    queryFn: async () => {
+      const res = await api.get("/api/v1/schedules/unassigned-summary");
+      return res.data?.data;
+    },
+  });
+
+  const { data: branches = [] } = useQuery({
+    queryKey: ["all-branches"],
+    queryFn: async () => {
+      const res = await api.get("/api/v1/branches");
+      return res.data?.data || [];
+    },
+  });
+
+  // Dynamic Academic Years, Grades, and Classes from Academic Module
+  const { data: dbAcademicYears = [] } = useQuery({
+    queryKey: ["academic-years-list"],
+    queryFn: async () => {
+      try {
+        const res = await api.get("/api/v1/academic/years");
+        return res.data?.data || [];
+      } catch {
+        return [];
+      }
+    },
+  });
+
+  const { data: dbGrades = [] } = useQuery({
+    queryKey: ["academic-grades-for-student", formData.academicYear],
+    queryFn: async () => {
+      try {
+        const yr = formData.academicYear || "2026-2027";
+        const res = await api.get(`/api/v1/academic/grades?academicYear=${encodeURIComponent(yr)}`);
+        return res.data?.data || [];
+      } catch {
+        return [];
+      }
+    },
+  });
+
+  const { data: dbClasses = [] } = useQuery({
+    queryKey: ["academic-classes-for-student", formData.academicYear, formData.grade],
+    queryFn: async () => {
+      try {
+        const yr = formData.academicYear || "2026-2027";
+        const gr = formData.grade || "";
+        const res = await api.get(`/api/v1/academic/classes?academicYear=${encodeURIComponent(yr)}&gradeName=${encodeURIComponent(gr)}`);
+        return res.data?.data || [];
+      } catch {
+        return [];
+      }
+    },
+  });
+
+  // Pick the first branch for the current tenant as a safe default
+  const defaultBranchId = branches?.[0]?.id ?? "";
+
   const [loadingNextCode, setLoadingNextCode] = useState(false);
+  const [batchYear, setBatchYear] = useState("26");
+  const [loadingNextId, setLoadingNextId] = useState(false);
 
   const fetchNextStudentCode = async () => {
     setLoadingNextCode(true);
@@ -129,13 +208,40 @@ export default function StudentsPage() {
     }
   };
 
+  const fetchNextStudentId = async (yr) => {
+    const yearToFetch = yr !== undefined ? yr : batchYear;
+    setLoadingNextId(true);
+    try {
+      const res = await api.get(`/api/v1/students/next-id-number?year=${yearToFetch}`);
+      if (res.data?.data?.nextIdNumber) {
+        setFormData((prev) => ({ ...prev, idNumber: res.data.data.nextIdNumber }));
+      }
+    } catch (e) {
+      console.warn("Failed to fetch next student ID", e);
+    } finally {
+      setLoadingNextId(false);
+    }
+  };
+
+  const handleYearChange = (yr) => {
+    const cleaned = yr.replace(/\D/g, "").slice(-2);
+    setBatchYear(cleaned);
+    if (cleaned.length >= 1) {
+      fetchNextStudentId(cleaned);
+    }
+  };
+
   const openCreateModal = async () => {
     setEditingStudentId(null);
+    const initialYear = "26";
+    setBatchYear(initialYear);
     setFormData({
       studentCode: "",
+      idNumber: "",
       englishName: "",
       khmerName: "",
       gender: "MALE",
+      branchId: defaultBranchId,  // tenant-specific first branch
       className: "Class 10A",
       grade: "Grade 10",
       academicYear: "2026-2027",
@@ -143,18 +249,31 @@ export default function StudentsPage() {
       status: "ACTIVE",
       cardNumber: "",
       profileImageUrl: "",
+      shiftId: shifts?.find((s) => s.name?.toLowerCase().includes("student"))?.id
+        ? String(shifts?.find((s) => s.name?.toLowerCase().includes("student"))?.id)
+        : (shifts?.[0]?.id ? String(shifts[0].id) : ""),
     });
     setShowModal(true);
-    await fetchNextStudentCode();
+    await Promise.all([fetchNextStudentCode(), fetchNextStudentId(initialYear)]);
   };
 
   const openEditModal = (student) => {
     setEditingStudentId(student.id);
+    let extractedYear = "26";
+    if (student.idNumber && student.idNumber.match(/^FBIS(\d{2})/i)) {
+      extractedYear = student.idNumber.match(/^FBIS(\d{2})/i)[1];
+    } else if (student.academicYear) {
+      const match = student.academicYear.match(/\d{4}/);
+      if (match) extractedYear = match[0].slice(-2);
+    }
+    setBatchYear(extractedYear);
     setFormData({
       studentCode: student.studentCode || "",
+      idNumber: student.idNumber || "",
       englishName: student.englishName || "",
       khmerName: student.khmerName || "",
       gender: student.gender || "MALE",
+      branchId: student.branchId || defaultBranchId,
       className: student.className || "Class 10A",
       grade: student.grade || "Grade 10",
       academicYear: student.academicYear || "2026-2027",
@@ -183,12 +302,13 @@ export default function StudentsPage() {
   });
 
   const { data: studentsData, isLoading, refetch } = useQuery({
-    queryKey: ["students", search, className, gradeFilter, statusFilter, page, pageSize],
+    queryKey: ["students", search, className, gradeFilter, branchFilter, statusFilter, page, pageSize],
     queryFn: async () => {
       let url = `/api/v1/students?page=${page}&size=${pageSize}`;
       if (search) url += `&search=${encodeURIComponent(search)}`;
       if (className) url += `&className=${encodeURIComponent(className)}`;
       if (gradeFilter) url += `&grade=${encodeURIComponent(gradeFilter)}`;
+      if (branchFilter) url += `&branchId=${branchFilter}`;
       if (statusFilter !== "ALL") url += `&status=${statusFilter}`;
       const res = await api.get(url);
       return res.data?.data;
@@ -253,6 +373,7 @@ export default function StudentsPage() {
         englishName: "",
         khmerName: "",
         gender: "MALE",
+        branchId: defaultBranchId,  // tenant-specific first branch
         className: "Class 10A",
         grade: "Grade 10",
         academicYear: "2026-2027",
@@ -289,6 +410,8 @@ export default function StudentsPage() {
     try {
       await api.delete(`/api/v1/students/${id}`);
       queryClient.invalidateQueries(["students"]);
+      queryClient.invalidateQueries(["all-schedules"]);
+      queryClient.invalidateQueries(["unassigned-summary"]);
     } catch (err) {
       alert("Error: " + err.message);
     }
@@ -411,64 +534,117 @@ export default function StudentsPage() {
         </div>
       </div>
 
+      {/* Schedule Alert Banner */}
+      {unassignedSummary?.unassignedStudentsCount > 0 && (
+        <div className="bg-amber-50/90 dark:bg-amber-950/40 border border-amber-200/90 dark:border-amber-800 rounded-2xl p-4 shadow-xs text-amber-950 dark:text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-in fade-in duration-300">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-amber-100 dark:bg-amber-900/60 text-amber-700 dark:text-amber-300 flex items-center justify-center shrink-0">
+              <AlertTriangle size={20} />
+            </div>
+            <div>
+              <h4 className="font-bold text-sm text-amber-900 dark:text-amber-200">
+                Schedule Assignment Alert: {unassignedSummary.unassignedStudentsCount} Student{unassignedSummary.unassignedStudentsCount > 1 ? "s" : ""} Unassigned
+              </h4>
+              <p className="text-xs text-amber-800/90 dark:text-amber-300/90 mt-0.5">
+                Students without an assigned school shift schedule cannot calculate morning/afternoon attendance, late arrivals, or class sessions accurately.
+              </p>
+            </div>
+          </div>
+          <Link
+            href="/schedules"
+            className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-xl text-xs transition-colors shadow-xs shrink-0 flex items-center gap-1.5"
+          >
+            <span>Assign in Schedules &rarr;</span>
+          </Link>
+        </div>
+      )}
+
       {/* Filter Bar */}
       <div className="flex flex-wrap items-center justify-between gap-4 p-3 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
         <div className="flex flex-wrap items-center gap-3 flex-1">
-          <div className="relative flex-1 min-w-[200px] max-w-sm">
-            <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+          <div className="h-10 flex items-center gap-2.5 flex-1 min-w-[200px] max-w-sm px-3.5 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus-within:ring-2 focus-within:ring-indigo-500/30 focus-within:border-indigo-500 dark:focus-within:border-indigo-400 transition-all">
+            <Search size={16} className="text-slate-400 dark:text-slate-500 shrink-0 pointer-events-none select-none" />
             <input
               type="text"
               placeholder="Search code or student name..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-full pl-9 pr-4 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border-none text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              className="w-full bg-transparent border-none text-xs text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:ring-0 font-medium p-0 leading-normal"
             />
           </div>
 
-          <select
-            value={gradeFilter}
-            onChange={(e) => {
-              setGradeFilter(e.target.value);
-              setPage(0);
-            }}
-            className="px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer font-semibold"
-          >
-            <option value="">All Grades</option>
-            {ALL_GRADES.map((g) => (
-              <option key={g} value={g}>{g}</option>
-            ))}
-          </select>
+          <div className="h-10 flex items-center gap-2 px-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus-within:ring-2 focus-within:ring-indigo-500/30 focus-within:border-indigo-500 transition-all">
+            <GraduationCap size={15} className="text-slate-400 shrink-0 pointer-events-none" />
+            <select
+              value={gradeFilter}
+              onChange={(e) => {
+                setGradeFilter(e.target.value);
+                setPage(0);
+              }}
+              className="bg-transparent border-none text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-0 font-semibold cursor-pointer p-0 leading-normal"
+            >
+              <option value="" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">All Grades</option>
+              {ALL_GRADES.map((g) => (
+                <option key={g} value={g} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">{g}</option>
+              ))}
+            </select>
+          </div>
 
-          <select
-            value={className}
-            onChange={(e) => {
-              setClassName(e.target.value);
-              setPage(0);
-            }}
-            className="px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer font-semibold"
-          >
-            <option value="">All Classes</option>
-            <option value="Class 12A">Class 12A</option>
-            <option value="Class 12B">Class 12B</option>
-            <option value="Class 11A">Class 11A</option>
-            <option value="Class 10A">Class 10A</option>
-          </select>
+          <div className="h-10 flex items-center gap-2 px-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus-within:ring-2 focus-within:ring-indigo-500/30 focus-within:border-indigo-500 transition-all">
+            <Layers size={15} className="text-slate-400 shrink-0 pointer-events-none" />
+            <select
+              value={className}
+              onChange={(e) => {
+                setClassName(e.target.value);
+                setPage(0);
+              }}
+              className="bg-transparent border-none text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-0 font-semibold cursor-pointer p-0 leading-normal"
+            >
+              <option value="" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">All Classes</option>
+              <option value="Class 12A" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Class 12A</option>
+              <option value="Class 12B" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Class 12B</option>
+              <option value="Class 11A" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Class 11A</option>
+              <option value="Class 10A" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Class 10A</option>
+            </select>
+          </div>
 
-          <select
-            value={statusFilter}
-            onChange={(e) => {
-              setStatusFilter(e.target.value);
-              setPage(0);
-            }}
-            className="px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer font-semibold"
-          >
-            <option value="ALL">All Status</option>
-            <option value="ACTIVE">Active Students</option>
-            <option value="INACTIVE">Inactive Students</option>
-            <option value="GRADUATED">Graduated</option>
-            <option value="SUSPENDED">Suspended</option>
-            <option value="WITHDRAWN">Withdrawn</option>
-          </select>
+          <div className="h-10 flex items-center gap-2 px-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus-within:ring-2 focus-within:ring-indigo-500/30 focus-within:border-indigo-500 transition-all">
+            <Activity size={15} className="text-slate-400 shrink-0 pointer-events-none" />
+            <select
+              value={statusFilter}
+              onChange={(e) => {
+                setStatusFilter(e.target.value);
+                setPage(0);
+              }}
+              className="bg-transparent border-none text-xs text-slate-900 dark:text-white focus:outline-none font-semibold cursor-pointer p-0"
+            >
+              <option value="ALL" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">All Status</option>
+              <option value="ACTIVE" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Active Students</option>
+              <option value="INACTIVE" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Inactive Students</option>
+              <option value="GRADUATED" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Graduated</option>
+              <option value="SUSPENDED" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Suspended</option>
+              <option value="WITHDRAWN" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">Withdrawn</option>
+            </select>
+          </div>
+
+          <div className="h-10 flex items-center gap-2 px-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus-within:ring-2 focus-within:ring-indigo-500/30 focus-within:border-indigo-500 transition-all">
+            <GitFork size={15} className="text-slate-400 shrink-0 pointer-events-none" />
+            <select
+              value={branchFilter}
+              onChange={(e) => {
+                setBranchFilter(e.target.value);
+                setPage(0);
+              }}
+              className="bg-transparent border-none text-xs text-slate-900 dark:text-white focus:outline-none font-semibold cursor-pointer p-0"
+            >
+              <option value="" className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">All Branches (គ្រប់សាខា)</option>
+              {branches?.map((b) => (
+                <option key={b.id} value={b.id} className="bg-white dark:bg-slate-900 text-slate-900 dark:text-white">
+                  📍 {b.name} ({b.code})
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
 
         <button
@@ -501,8 +677,11 @@ export default function StudentsPage() {
                   />
                 </th>
                 <th className="py-3 px-4">Student</th>
-                <th className="py-3 px-4">Code</th>
+                <th className="py-3 px-4">Student ID (អត្តលេខ)</th>
+                <th className="py-3 px-4">Code / PIN</th>
                 <th className="py-3 px-4">Class & Grade</th>
+                <th className="py-3 px-4">Branch (សាខា)</th>
+                <th className="py-3 px-4">Shift / Schedule</th>
                 <th className="py-3 px-4">Academic Year</th>
                 <th className="py-3 px-4">Parent Contact</th>
                 <th className="py-3 px-4">Status</th>
@@ -512,11 +691,11 @@ export default function StudentsPage() {
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
               {isLoading ? (
                 <tr>
-                  <td colSpan={8} className="py-8 text-center text-slate-400">Loading students...</td>
+                  <td colSpan={11} className="py-8 text-center text-slate-400">Loading students...</td>
                 </tr>
               ) : students.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="py-12 text-center text-slate-400">
+                  <td colSpan={11} className="py-12 text-center text-slate-400">
                     <GraduationCap size={32} className="mx-auto mb-2 opacity-50" />
                     <p className="font-semibold">No students found</p>
                     <p className="text-[11px]">Click "Register Student" or import from School MIS.</p>
@@ -555,12 +734,42 @@ export default function StudentsPage() {
                         </div>
                       </div>
                     </td>
-                    <td className="py-3 px-4 font-mono font-medium text-slate-700 dark:text-slate-300">
-                      {s.studentCode}
+                    <td className="py-3 px-4">
+                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-lg text-xs font-bold font-mono bg-sky-50 dark:bg-sky-950/60 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800">
+                        {s.idNumber || ("FBIS" + String(s.studentCode).padStart(4, "0"))}
+                      </span>
+                    </td>
+                    <td className="py-3 px-4">
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-bold font-mono bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700">
+                        PIN: {s.studentCode}
+                      </span>
                     </td>
                     <td className="py-3 px-4">
                       <span className="font-semibold text-slate-900 dark:text-white block">{s.className || "-"}</span>
                       <span className="text-[10px] text-slate-400">{s.grade || "Secondary"}</span>
+                    </td>
+                    <td className="py-3 px-4">
+                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800/60 whitespace-nowrap">
+                        <GitFork size={12} className="text-indigo-500 shrink-0" />
+                        <span>{s.branchName || "Branch 1"}</span>
+                      </span>
+                    </td>
+                    <td className="py-3 px-4">
+                      {s.scheduleAssigned ? (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 whitespace-nowrap">
+                          <Clock size={11} className="text-emerald-500 shrink-0" />
+                          <span>{s.currentShiftName || "Assigned"}</span>
+                        </span>
+                      ) : (
+                        <Link
+                          href="/schedules"
+                          className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 border border-amber-300 dark:border-amber-700 hover:bg-amber-100 transition-colors whitespace-nowrap"
+                          title="Click to assign schedule"
+                        >
+                          <AlertTriangle size={11} className="text-amber-600 shrink-0" />
+                          <span>No Schedule</span>
+                        </Link>
+                      )}
                     </td>
                     <td className="py-3 px-4 text-slate-600 dark:text-slate-400">
                       {s.academicYear || "2026-2027"}
@@ -731,6 +940,62 @@ export default function StudentsPage() {
                   <div>
                     <div className="flex items-center justify-between mb-1">
                       <label className="font-semibold text-slate-700 dark:text-slate-300">
+                        Student ID (អត្តលេខ)
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => fetchNextStudentId(batchYear)}
+                        disabled={loadingNextId}
+                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
+                        title="Calculate next sequential ID for chosen year"
+                      >
+                        <RefreshCw size={11} className={loadingNextId ? "animate-spin" : ""} />
+                        <span>{loadingNextId ? "Generating..." : "Auto ID"}</span>
+                      </button>
+                    </div>
+
+                    {/* Batch Year Selector Chips */}
+                    <div className="flex items-center gap-1.5 mb-1.5">
+                      <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">Year:</span>
+                      {["25", "26", "27", "28"].map((yr) => (
+                        <button
+                          key={yr}
+                          type="button"
+                          onClick={() => handleYearChange(yr)}
+                          className={`px-2 py-0.5 rounded-md text-xs font-bold transition-all cursor-pointer ${
+                            batchYear === yr
+                              ? "bg-indigo-600 text-white shadow-sm"
+                              : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700"
+                          }`}
+                        >
+                          {yr}
+                        </button>
+                      ))}
+                      <input
+                        type="text"
+                        maxLength={2}
+                        placeholder="YY"
+                        value={batchYear}
+                        onChange={(e) => handleYearChange(e.target.value)}
+                        className="w-10 px-1 py-0.5 text-xs text-center rounded-md bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 font-bold text-slate-800 dark:text-white"
+                        title="Custom 2-digit Year (e.g. 24, 25, 26, 27)"
+                      />
+                    </div>
+
+                    <input
+                      type="text"
+                      placeholder="e.g. FBIS260001"
+                      value={formData.idNumber}
+                      onChange={(e) => setFormData({ ...formData, idNumber: e.target.value.toUpperCase() })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono font-bold"
+                    />
+                    <p className="text-[10px] text-emerald-600 dark:text-emerald-400 mt-1 font-medium">
+                      ✓ Auto ID: FBIS + Year ({batchYear}) + 4-digit auto index ({formData.idNumber || `FBIS${batchYear}0001`})
+                    </p>
+                  </div>
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="font-semibold text-slate-700 dark:text-slate-300">
                         Student Code / Terminal PIN *
                       </label>
                       <button
@@ -741,14 +1006,15 @@ export default function StudentsPage() {
                         title="Generate fresh unique PIN"
                       >
                         <RefreshCw size={11} className={loadingNextCode ? "animate-spin" : ""} />
-                        Auto-Generated
+                        <span>{loadingNextCode ? "Generating..." : "Auto-Generated"}</span>
                       </button>
                     </div>
                     <input
                       type="text"
                       inputMode="numeric"
                       pattern="[0-9]*"
-                      placeholder="e.g. 40002"
+                      disabled={!!editingStudentId}
+                      placeholder="Auto-generated PIN (e.g. 1)"
                       value={formData.studentCode}
                       onChange={(e) => setFormData({ ...formData, studentCode: e.target.value.replace(/\D/g, "") })}
                       className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono"
@@ -757,6 +1023,9 @@ export default function StudentsPage() {
                       ✓ System auto-generates non-colliding numeric PIN across all personnel and machines.
                     </p>
                   </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Gender *</label>
                     <select
@@ -766,6 +1035,18 @@ export default function StudentsPage() {
                     >
                       <option value="MALE">Male</option>
                       <option value="FEMALE">Female</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Campus / Branch</label>
+                    <select
+                      value={formData.branchId}
+                      onChange={(e) => setFormData({ ...formData, branchId: e.target.value })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer"
+                    >
+                      {branches.map((b) => (
+                        <option key={b.id} value={b.id}>{b.name}</option>
+                      ))}
                     </select>
                   </div>
                 </div>
@@ -802,9 +1083,15 @@ export default function StudentsPage() {
                       onChange={(e) => setFormData({ ...formData, grade: e.target.value })}
                       className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 font-semibold cursor-pointer"
                     >
-                      {ALL_GRADES.map((g) => (
-                        <option key={g} value={g}>{g}</option>
-                      ))}
+                      {dbGrades.length > 0
+                        ? dbGrades.map((g) => (
+                            <option key={g.id || g.name} value={g.name}>
+                              {g.name} {g.khmerName && g.khmerName !== g.name ? `(${g.khmerName})` : ""}
+                            </option>
+                          ))
+                        : ALL_GRADES.map((g) => (
+                            <option key={g} value={g}>{g}</option>
+                          ))}
                     </select>
                   </div>
                   <div>
@@ -812,11 +1099,19 @@ export default function StudentsPage() {
                     <input
                       type="text"
                       required
-                      placeholder="Class 12A"
+                      list="studentModalClassSuggestions"
+                      placeholder="e.g. Class 10A"
                       value={formData.className}
                       onChange={(e) => setFormData({ ...formData, className: e.target.value })}
-                      className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 font-semibold"
                     />
+                    <datalist id="studentModalClassSuggestions">
+                      {dbClasses.map((c) => (
+                        <option key={c.id || c.name} value={c.name}>
+                          {c.name} {c.khmerName && c.khmerName !== c.name ? `(${c.khmerName})` : ""}
+                        </option>
+                      ))}
+                    </datalist>
                   </div>
                 </div>
 
@@ -825,24 +1120,91 @@ export default function StudentsPage() {
                     <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Academic Year *</label>
                     <select
                       value={formData.academicYear}
-                      onChange={(e) => setFormData({ ...formData, academicYear: e.target.value })}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setFormData({ ...formData, academicYear: val });
+                        if (!editingStudentId) {
+                          const match = val.match(/\d{4}/);
+                          if (match) {
+                            handleYearChange(match[0].slice(-2));
+                          }
+                        }
+                      }}
                       className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 font-semibold cursor-pointer"
                     >
-                      <option value="2026-2027">2026-2027 (Current)</option>
-                      <option value="2025-2026">2025-2026</option>
-                      <option value="2024-2025">2024-2025</option>
+                      {dbAcademicYears.length > 0 ? (
+                        dbAcademicYears.map((y) => (
+                          <option key={y.id || y.code} value={y.code}>
+                            {y.code} {y.isCurrent ? "(Current Year)" : ""}
+                          </option>
+                        ))
+                      ) : (
+                        <>
+                          <option value="2026-2027">2026-2027 (Current)</option>
+                          <option value="2025-2026">2025-2026</option>
+                          <option value="2024-2025">2024-2025</option>
+                          <option value="2027-2028">2027-2028</option>
+                        </>
+                      )}
                     </select>
                   </div>
                   <div>
                     <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Parent Phone</label>
-                    <input
-                      type="text"
-                      placeholder="+855 12 888 777"
+                    <KhmerPhoneInput
                       value={formData.parentContact}
-                      onChange={(e) => setFormData({ ...formData, parentContact: e.target.value })}
-                      className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      onChange={(val) => setFormData({ ...formData, parentContact: val })}
                     />
                   </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Campus Branch (សាខា) *</label>
+                    <select
+                      value={formData.branchId || defaultBranchId || ""}
+                      onChange={(e) => setFormData({ ...formData, branchId: Number(e.target.value) })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 font-semibold cursor-pointer"
+                    >
+                      {branches?.map((b) => (
+                        <option key={b.id} value={b.id}>
+                          📍 {b.name} ({b.code})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">Enrollment Status *</label>
+                    <select
+                      value={formData.status}
+                      onChange={(e) => setFormData({ ...formData, status: e.target.value })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 font-semibold cursor-pointer"
+                    >
+                      <option value="ACTIVE">Active (សិក្សាធម្មតា)</option>
+                      <option value="INACTIVE">Inactive (ផ្អាក)</option>
+                      <option value="GRADUATED">Graduated (បញ្ចប់ការសិក្សា)</option>
+                      <option value="SUSPENDED">Suspended (ព្យួរ)</option>
+                      <option value="WITHDRAWN">Withdrawn (ឈប់រៀន)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="font-semibold text-slate-700 dark:text-slate-300 block mb-1">
+                    Assigned Shift / Schedule (វេនសិក្សា)
+                  </label>
+                  <select
+                    value={formData.shiftId}
+                    onChange={(e) => setFormData({ ...formData, shiftId: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 text-xs font-semibold cursor-pointer"
+                  >
+                    <option value="">Select Shift (Optional)</option>
+                    {shifts?.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name} ({s.startTime} - {s.endTime})
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[10px] text-slate-400 mt-1">If selected, an active recurring class shift will automatically be created for this student.</p>
                 </div>
 
                 <div className="p-3 rounded-2xl bg-indigo-50/60 dark:bg-indigo-950/30 border border-indigo-200/80 dark:border-indigo-800/60">

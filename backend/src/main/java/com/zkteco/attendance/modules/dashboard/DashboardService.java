@@ -32,15 +32,32 @@ public class DashboardService {
     public DashboardSummaryDto getSummary() {
         LocalDate today = TimeUtils.todayInPhnomPenh();
 
-        long totalEmployees = employeeRepository.countByEmploymentStatusAndDeletedAtIsNull("ACTIVE");
-        long totalStudents = studentRepository.countByStatusAndDeletedAtIsNull("ACTIVE");
+        String activeTenant = com.zkteco.attendance.modules.tenant.TenantContext.resolveEffectiveTenant();
+        boolean isAll = "all".equalsIgnoreCase(activeTenant);
 
-        long presentToday = attendanceRecordRepository.countPresentToday(today);
-        long lateToday = attendanceRecordRepository.countByAttendanceDateAndStatus(today, "LATE");
-        long absentToday = attendanceRecordRepository.countByAttendanceDateAndStatus(today, "ABSENT");
-        long onLeaveToday = leaveRequestRepository.countEmployeesOnLeaveToday(today);
+        long totalEmployees = isAll
+                ? employeeRepository.countByEmploymentStatusAndDeletedAtIsNull("ACTIVE")
+                : employeeRepository.countByCompanyCodeAndEmploymentStatusAndDeletedAtIsNull(activeTenant, "ACTIVE");
+        long totalStudents = isAll
+                ? studentRepository.countByStatusAndDeletedAtIsNull("ACTIVE")
+                : studentRepository.countByCompanyCodeAndStatusAndDeletedAtIsNull(activeTenant, "ACTIVE");
 
-        List<AttendanceRecord> todayRecords = attendanceRecordRepository.findByAttendanceDate(today);
+        long presentToday = isAll
+                ? attendanceRecordRepository.countPresentToday(today)
+                : attendanceRecordRepository.countCompanyPresentToday(activeTenant, today);
+        long lateToday = isAll
+                ? attendanceRecordRepository.countByAttendanceDateAndStatus(today, "LATE")
+                : attendanceRecordRepository.countByCompanyCodeAndAttendanceDateAndStatus(activeTenant, today, "LATE");
+        long absentToday = isAll
+                ? attendanceRecordRepository.countByAttendanceDateAndStatus(today, "ABSENT")
+                : attendanceRecordRepository.countByCompanyCodeAndAttendanceDateAndStatus(activeTenant, today, "ABSENT");
+        long onLeaveToday = isAll
+                ? leaveRequestRepository.countEmployeesOnLeaveToday(today)
+                : leaveRequestRepository.countCompanyEmployeesOnLeaveToday(activeTenant, today);
+
+        List<AttendanceRecord> todayRecords = isAll
+                ? attendanceRecordRepository.findByAttendanceDate(today)
+                : attendanceRecordRepository.findByCompanyCodeAndAttendanceDate(activeTenant, today);
         long currentlyWorking = todayRecords.stream()
                 .filter(r -> r.getFirstCheckIn() != null && r.getLastCheckOut() == null)
                 .count();
@@ -49,16 +66,26 @@ public class DashboardService {
                 ? Math.round(((double) presentToday / totalEmployees) * 1000.0) / 10.0
                 : 0.0;
 
-        long devicesOnline = deviceRepository.countByConnectionStatus("ONLINE");
-        long devicesOffline = deviceRepository.countByConnectionStatus("OFFLINE");
+        long devicesOnline = isAll
+                ? deviceRepository.countByConnectionStatus("ONLINE")
+                : deviceRepository.countByCompanyCodeAndConnectionStatus(activeTenant, "ONLINE");
+        long devicesOffline = isAll
+                ? deviceRepository.countByConnectionStatus("OFFLINE")
+                : deviceRepository.countByCompanyCodeAndConnectionStatus(activeTenant, "OFFLINE");
 
         // 7-day trend
         List<DashboardSummaryDto.DailyTrendDto> weeklyTrend = new ArrayList<>();
         for (int i = 6; i >= 0; i--) {
             LocalDate d = today.minusDays(i);
-            long p = attendanceRecordRepository.countPresentToday(d);
-            long l = attendanceRecordRepository.countByAttendanceDateAndStatus(d, "LATE");
-            long a = attendanceRecordRepository.countByAttendanceDateAndStatus(d, "ABSENT");
+            long p = isAll
+                    ? attendanceRecordRepository.countPresentToday(d)
+                    : attendanceRecordRepository.countCompanyPresentToday(activeTenant, d);
+            long l = isAll
+                    ? attendanceRecordRepository.countByAttendanceDateAndStatus(d, "LATE")
+                    : attendanceRecordRepository.countByCompanyCodeAndAttendanceDateAndStatus(activeTenant, d, "LATE");
+            long a = isAll
+                    ? attendanceRecordRepository.countByAttendanceDateAndStatus(d, "ABSENT")
+                    : attendanceRecordRepository.countByCompanyCodeAndAttendanceDateAndStatus(activeTenant, d, "ABSENT");
 
             weeklyTrend.add(DashboardSummaryDto.DailyTrendDto.builder()
                     .date(d.toString())
@@ -69,7 +96,9 @@ public class DashboardService {
         }
 
         // Department stats
-        List<Department> departments = departmentRepository.findAllByActiveTrue();
+        List<Department> departments = isAll
+                ? departmentRepository.findAllByActiveTrue()
+                : departmentRepository.findByCompanyCodeAndActiveTrue(activeTenant);
         List<DashboardSummaryDto.DepartmentStatDto> deptStats = new ArrayList<>();
         for (Department dept : departments) {
             long deptEmpCount = todayRecords.stream()
