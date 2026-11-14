@@ -107,6 +107,7 @@ lerna-debug.log*
 out/
 .turbo/
 .vercel/
+uploads/
 
 # Testing & Coverage
 coverage/
